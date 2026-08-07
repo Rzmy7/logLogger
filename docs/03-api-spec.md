@@ -1,0 +1,838 @@
+# API & Interface Specification
+
+> **Version:** 1.0  
+> **Date:** 2026-08-06  
+> **Status:** Draft  
+> **Related:** `01-scope.md`, `04-data-model.md`
+
+---
+
+## 1. Overview
+
+This document defines all public interfaces for the log analytics platform:
+
+- **HTTP APIs:** REST endpoints exposed by the Ingestor and Analytics services.
+- **CLI Tools:** Command-line interfaces for the admin tool (`logctl`) and load generator (`loadgen`).
+
+All HTTP APIs return JSON and use standard HTTP status codes. All timestamps are RFC3339 unless noted otherwise.
+
+---
+
+## 2. HTTP API Conventions
+
+### 2.1 Base URLs
+
+| Service | Base URL | Environment Variable |
+|---------|----------|---------------------|
+| Ingestor | `http://localhost:8081` | `INGESTOR_ADDR` |
+| Analytics | `http://localhost:8082` | `ANALYTICS_ADDR` |
+
+### 2.2 Common Response Format
+
+**Success (2xx):**
+```json
+{
+  "data": { ... },
+  "meta": {
+    "request_id": "req_abc123",
+    "timestamp": "2026-08-06T10:00:00Z"
+  }
+}
+```
+
+**Error (4xx/5xx):**
+```json
+{
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "Field 'level' must be one of: DEBUG, INFO, WARN, ERROR, FATAL",
+    "details": { "field": "level", "received": "CRITICAL" }
+  },
+  "meta": {
+    "request_id": "req_abc123",
+    "timestamp": "2026-08-06T10:00:00Z"
+  }
+}
+```
+
+### 2.3 Common Headers
+
+| Header | Required | Value |
+|--------|----------|-------|
+| `Content-Type` | Yes (POST/PUT) | `application/json` |
+| `X-Request-ID` | No | Client-generated trace ID (falls back to server-generated) |
+
+### 2.4 HTTP Status Codes
+
+| Code | Meaning | When Used |
+|------|---------|-----------|
+| `200` | OK | Successful GET request |
+| `202` | Accepted | Log queued successfully (asynchronous) |
+| `400` | Bad Request | Validation failure, malformed JSON |
+| `404` | Not Found | Resource does not exist |
+| `429` | Too Many Requests | Rate limit exceeded (Redis TTL check) |
+| `503` | Service Unavailable | Kafka or PostgreSQL unreachable |
+
+---
+
+## 3. Log Ingestor API (`:8081`)
+
+### 3.1 `POST /api/v1/logs`
+
+Accept and queue a log for processing.
+
+**Request:**
+```http
+POST /api/v1/logs HTTP/1.1
+Host: localhost:8081
+Content-Type: application/json
+X-Request-ID: req_abc123
+
+{
+  "timestamp": "2026-08-06T10:00:00Z",
+  "level": "ERROR",
+  "service": "payment-api",
+  "message": "DB connection timeout after 30s",
+  "trace_id": "abc-123-def-456",
+  "ip": "192.168.1.5"
+}
+```
+
+**Field Specification:**
+
+| Field | Type | Required | Constraints |
+|-------|------|----------|-------------|
+| `timestamp` | string | Yes | RFC3339 format |
+| `level` | string | Yes | Enum: `DEBUG`, `INFO`, `WARN`, `ERROR`, `FATAL` |
+| `service` | string | Yes | Must exist in PostgreSQL `services` table |
+| `message` | string | Yes | 1–1000 characters |
+| `trace_id` | string | No | Any string, used for Kafka partitioning |
+| `ip` | string | No | Valid IPv4 or IPv6 address |
+
+**Response `202 Accepted`:**
+```json
+{
+  "data": {
+    "status": "queued",
+    "trace_id": "abc-123-def-456",
+    "request_id": "req_abc123"
+  },
+  "meta": {
+    "request_id": "req_abc123",
+    "timestamp": "2026-08-06T10:00:00.100Z"
+  }
+}
+```
+
+**Response `400 Bad Request` (validation failure):**
+```json
+{
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "Validation failed",
+    "details": [
+      { "field": "level", "message": "must be one of DEBUG, INFO, WARN, ERROR, FATAL" },
+      { "field": "service", "message": "service 'unknown-api' does not exist" }
+    ]
+  },
+  "meta": { "request_id": "req_abc123", "timestamp": "2026-08-06T10:00:00.100Z" }
+}
+```
+
+**Response `429 Too Many Requests`:**
+```json
+{
+  "error": {
+    "code": "RATE_LIMITED",
+    "message": "Rate limit exceeded. Try again in 45 seconds."
+  },
+  "meta": { "request_id": "req_abc123", "timestamp": "2026-08-06T10:00:00.100Z" }
+}
+```
+
+**Response `503 Service Unavailable`:**
+```json
+{
+  "error": {
+    "code": "KAFKA_UNAVAILABLE",
+    "message": "Unable to queue log. Kafka broker unreachable."
+  },
+  "meta": { "request_id": "req_abc123", "timestamp": "2026-08-06T10:00:00.100Z" }
+}
+```
+
+**Rate Limiting:**
+- Checked via Redis key `ratelimit:{client_ip}`
+- Max 100 requests per minute per IP
+- TTL: 60 seconds
+
+---
+
+### 3.2 `GET /health`
+
+Health check for load balancers and monitoring.
+
+**Request:**
+```http
+GET /health HTTP/1.1
+Host: localhost:8081
+```
+
+**Response `200 OK` (all healthy):**
+```json
+{
+  "data": {
+    "status": "healthy",
+    "services": {
+      "kafka": "up",
+      "postgresql": "up"
+    }
+  },
+  "meta": { "request_id": "req_abc123", "timestamp": "2026-08-06T10:00:00Z" }
+}
+```
+
+**Response `503 Service Unavailable` (degraded):**
+```json
+{
+  "data": {
+    "status": "degraded",
+    "services": {
+      "kafka": "up",
+      "postgresql": "down"
+    }
+  },
+  "meta": { "request_id": "req_abc123", "timestamp": "2026-08-06T10:00:00Z" }
+}
+```
+
+---
+
+## 4. Analytics API (`:8082`)
+
+### 4.1 `GET /health`
+
+Health check for Analytics API and its dependencies.
+
+**Request:**
+```http
+GET /health HTTP/1.1
+Host: localhost:8082
+```
+
+**Response `200 OK`:**
+```json
+{
+  "data": {
+    "status": "healthy",
+    "services": {
+      "redis": "up",
+      "elasticsearch": "up",
+      "postgresql": "up"
+    }
+  },
+  "meta": { "request_id": "req_xyz789", "timestamp": "2026-08-06T10:00:00Z" }
+}
+```
+
+---
+
+### 4.2 `GET /metrics/live`
+
+Real-time metrics from Redis. Sub-10ms response time.
+
+**Request:**
+```http
+GET /metrics/live HTTP/1.1
+Host: localhost:8082
+```
+
+**Query Parameters:**
+
+| Param | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `services` | string | No | `all` | Comma-separated list of service names, or `all` |
+
+**Response `200 OK`:**
+```json
+{
+  "data": {
+    "total_logs": 15420,
+    "services": {
+      "payment-api": {
+        "total_logs": 8921,
+        "total_errors": 42,
+        "errors_last_5m": 3
+      },
+      "auth-service": {
+        "total_logs": 4102,
+        "total_errors": 7,
+        "errors_last_5m": 0
+      },
+      "notification-service": {
+        "total_logs": 2397,
+        "total_errors": 1,
+        "errors_last_5m": 0
+      }
+    }
+  },
+  "meta": { "request_id": "req_xyz789", "timestamp": "2026-08-06T10:00:00Z" }
+}
+```
+
+**Redis Queries Executed:**
+- `GET stats:logs:total`
+- `GET stats:logs:{service}`
+- `GET stats:errors:{service}`
+- `GET stats:errors:last_5m:{service}`
+
+---
+
+### 4.3 `GET /metrics/top-errors`
+
+Ranked error messages by frequency (Redis Sorted Set).
+
+**Request:**
+```http
+GET /metrics/top-errors?n=5 HTTP/1.1
+Host: localhost:8082
+```
+
+**Query Parameters:**
+
+| Param | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `n` | int | No | 5 | Number of top errors to return (max 100) |
+
+**Response `200 OK`:**
+```json
+{
+  "data": {
+    "top_errors": [
+      { "message": "DB connection timeout", "count": 156 },
+      { "message": "HTTP 500 from upstream", "count": 89 },
+      { "message": "Redis connection refused", "count": 34 },
+      { "message": "JWT validation failed", "count": 21 },
+      { "message": "Timeout waiting for lock", "count": 12 }
+    ]
+  },
+  "meta": { "request_id": "req_xyz789", "timestamp": "2026-08-06T10:00:00Z" }
+}
+```
+
+**Redis Query Executed:**
+- `ZREVRANGE leaderboard:errors 0 {n-1} WITHSCORES`
+
+---
+
+### 4.4 `GET /metrics/top-services`
+
+Top services by log volume (Redis Sorted Set).
+
+**Request:**
+```http
+GET /metrics/top-services?n=5 HTTP/1.1
+Host: localhost:8082
+```
+
+**Query Parameters:**
+
+| Param | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `n` | int | No | 5 | Number of top services to return |
+
+**Response `200 OK`:**
+```json
+{
+  "data": {
+    "top_services": [
+      { "service": "payment-api", "count": 8921 },
+      { "service": "auth-service", "count": 4102 },
+      { "service": "notification-service", "count": 2397 }
+    ]
+  },
+  "meta": { "request_id": "req_xyz789", "timestamp": "2026-08-06T10:00:00Z" }
+}
+```
+
+**Redis Query Executed:**
+- `ZREVRANGE leaderboard:services 0 {n-1} WITHSCORES`
+
+---
+
+### 4.5 `GET /search`
+
+Full-text search in Elasticsearch with filters.
+
+**Request:**
+```http
+GET /search?q=timeout&service=payment-api&level=ERROR&from=2026-08-01T00:00:00Z&to=2026-08-06T23:59:59Z&page=1&size=20 HTTP/1.1
+Host: localhost:8082
+```
+
+**Query Parameters:**
+
+| Param | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `q` | string | No | `*` | Full-text search query on `message` field |
+| `service` | string | No | — | Exact match filter on `service` |
+| `level` | string | No | — | Exact match filter on `level` |
+| `trace_id` | string | No | — | Exact match filter on `trace_id` |
+| `from` | string | No | `now-24h` | Start timestamp (RFC3339) |
+| `to` | string | No | `now` | End timestamp (RFC3339) |
+| `page` | int | No | 1 | Page number (1-indexed) |
+| `size` | int | No | 20 | Results per page (max 100) |
+
+**Response `200 OK`:**
+```json
+{
+  "data": {
+    "total": 1042,
+    "page": 1,
+    "size": 20,
+    "pages": 53,
+    "logs": [
+      {
+        "timestamp": "2026-08-06T09:45:00Z",
+        "level": "ERROR",
+        "service": "payment-api",
+        "message": "DB connection timeout after 30s",
+        "trace_id": "abc-123-def-456",
+        "ip": "192.168.1.5",
+        "ingested_at": "2026-08-06T09:45:01Z"
+      }
+    ]
+  },
+  "meta": { "request_id": "req_xyz789", "timestamp": "2026-08-06T10:00:00Z" }
+}
+```
+
+**Response `400 Bad Request` (invalid date format):**
+```json
+{
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "Invalid date format",
+    "details": { "field": "from", "expected": "RFC3339", "received": "2026-08-01" }
+  },
+  "meta": { "request_id": "req_xyz789", "timestamp": "2026-08-06T10:00:00Z" }
+}
+```
+
+**Elasticsearch Query Generated:**
+```json
+{
+  "query": {
+    "bool": {
+      "must": [
+        { "match": { "message": "timeout" } }
+      ],
+      "filter": [
+        { "term": { "service": "payment-api" } },
+        { "term": { "level": "ERROR" } },
+        { "range": { "timestamp": { "gte": "2026-08-01T00:00:00Z", "lte": "2026-08-06T23:59:59Z" } } }
+      ]
+    }
+  },
+  "sort": [{ "timestamp": "desc" }],
+  "from": 0,
+  "size": 20
+}
+```
+
+---
+
+### 4.6 `GET /services`
+
+List all services with their application and environment (PostgreSQL join).
+
+**Request:**
+```http
+GET /services HTTP/1.1
+Host: localhost:8082
+```
+
+**Response `200 OK`:**
+```json
+{
+  "data": {
+    "services": [
+      {
+        "id": "550e8400-e29b-41d4-a716-446655440000",
+        "name": "payment-api",
+        "application": "ecommerce-platform",
+        "environment": "production",
+        "created_at": "2026-08-01T00:00:00Z"
+      },
+      {
+        "id": "550e8400-e29b-41d4-a716-446655440001",
+        "name": "auth-service",
+        "application": "ecommerce-platform",
+        "environment": "production",
+        "created_at": "2026-08-01T00:00:00Z"
+      }
+    ]
+  },
+  "meta": { "request_id": "req_xyz789", "timestamp": "2026-08-06T10:00:00Z" }
+}
+```
+
+**PostgreSQL Query Executed:**
+```sql
+SELECT s.id, s.name, a.name as application, e.name as environment, s.created_at
+FROM services s
+JOIN applications a ON s.application_id = a.id
+JOIN environments e ON s.environment_id = e.id
+ORDER BY s.name;
+```
+
+---
+
+### 4.7 `GET /services/{id}/recent-errors`
+
+Last 100 errors for a specific service (Redis List).
+
+**Request:**
+```http
+GET /services/550e8400-e29b-41d4-a716-446655440000/recent-errors?n=10 HTTP/1.1
+Host: localhost:8082
+```
+
+**Query Parameters:**
+
+| Param | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `n` | int | No | 10 | Number of recent errors (max 100) |
+
+**Response `200 OK`:**
+```json
+{
+  "data": {
+    "service": "payment-api",
+    "recent_errors": [
+      {
+        "timestamp": "2026-08-06T09:45:00Z",
+        "level": "ERROR",
+        "message": "DB connection timeout after 30s",
+        "trace_id": "abc-123-def-456"
+      }
+    ]
+  },
+  "meta": { "request_id": "req_xyz789", "timestamp": "2026-08-06T10:00:00Z" }
+}
+```
+
+**Redis Query Executed:**
+- `LRANGE recent:errors:payment-api 0 {n-1}`
+
+---
+
+## 5. Admin CLI (`logctl`)
+
+### 5.1 Global Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--analytics-url` | `http://localhost:8082` | Analytics API base URL |
+| `--ingestor-url` | `http://localhost:8081` | Ingestor API base URL |
+| `--format` | `table` | Output format: `table`, `json`, `yaml` |
+
+---
+
+### 5.2 `logctl app create`
+
+Create a new application.
+
+**Usage:**
+```bash
+logctl app create <name> [description]
+```
+
+**Example:**
+```bash
+logctl app create ecommerce "E-commerce Platform"
+```
+
+**Output:**
+```
+Created application:
+  ID:          550e8400-e29b-41d4-a716-446655440000
+  Name:        ecommerce
+  Description: E-commerce Platform
+  Created:     2026-08-06T10:00:00Z
+```
+
+---
+
+### 5.3 `logctl env create`
+
+Create a new environment.
+
+**Usage:**
+```bash
+logctl env create <name>
+```
+
+**Example:**
+```bash
+logctl env create production
+```
+
+---
+
+### 5.4 `logctl service create`
+
+Create a new service under an application and environment.
+
+**Usage:**
+```bash
+logctl service create <application> <environment> <name> [description]
+```
+
+**Example:**
+```bash
+logctl service create ecommerce production payment-api "Payment processing API"
+```
+
+**Output:**
+```
+Created service:
+  ID:          550e8400-e29b-41d4-a716-446655440001
+  Name:        payment-api
+  Application: ecommerce
+  Environment: production
+  Created:     2026-08-06T10:00:00Z
+```
+
+---
+
+### 5.5 `logctl service list`
+
+List all services.
+
+**Usage:**
+```bash
+logctl service list [--app=<name>] [--env=<name>]
+```
+
+**Example:**
+```bash
+logctl service list --app=ecommerce --env=production
+```
+
+**Output:**
+```
+NAME            APPLICATION       ENVIRONMENT    CREATED
+payment-api     ecommerce         production     2026-08-01T00:00:00Z
+auth-service    ecommerce         production     2026-08-01T00:00:00Z
+```
+
+---
+
+### 5.6 `logctl search`
+
+Search logs via the Analytics API.
+
+**Usage:**
+```bash
+logctl search [flags]
+```
+
+**Flags:**
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--q` | string | `*` | Search query |
+| `--service` | string | — | Filter by service |
+| `--level` | string | — | Filter by level |
+| `--from` | string | `now-1h` | Start time |
+| `--to` | string | `now` | End time |
+| `--size` | int | 20 | Results per page |
+| `--page` | int | 1 | Page number |
+
+**Example:**
+```bash
+logctl search --service=payment-api --level=ERROR --from="2026-08-06T00:00:00Z" --size=5
+```
+
+**Output:**
+```
+TIME                 LEVEL   SERVICE       MESSAGE
+2026-08-06T09:45:00Z ERROR   payment-api   DB connection timeout after 30s
+2026-08-06T09:44:30Z ERROR   payment-api   HTTP 500 from upstream
+```
+
+---
+
+### 5.7 `logctl benchmark`
+
+Run a load test against the Ingestor.
+
+**Usage:**
+```bash
+logctl benchmark [flags]
+```
+
+**Flags:**
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--rate` | int | 100 | Logs per second |
+| `--duration` | duration | 60s | Test duration |
+| `--service` | string | `payment-api` | Service name to use in generated logs |
+| `--level` | string | `INFO` | Log level distribution: `mixed`, `INFO`, `ERROR` |
+
+**Example:**
+```bash
+logctl benchmark --rate=1000 --duration=5m --service=payment-api --level=mixed
+```
+
+**Output:**
+```
+Benchmark Results:
+  Duration:        5m0s
+  Total Requests:  300000
+  Successful:      300000
+  Failed:          0
+  Rate (avg):      998.4 req/s
+  Latency (p50):   12ms
+  Latency (p99):   45ms
+```
+
+---
+
+### 5.8 `logctl dlq inspect`
+
+Inspect the Dead Letter Queue.
+
+**Usage:**
+```bash
+logctl dlq inspect [--limit=<n>]
+```
+
+**Example:**
+```bash
+logctl dlq inspect --limit=10
+```
+
+**Output:**
+```
+DLQ Status:
+  Total Messages: 42
+
+Recent Failures:
+  TIME                 ERROR                          SERVICE
+  2026-08-06T09:45:00Z invalid JSON: unexpected token unknown-api
+  2026-08-06T09:44:55Z service 'old-api' not found  old-api
+```
+
+---
+
+## 6. Load Generator CLI (`loadgen`)
+
+### 6.1 Usage
+
+```bash
+loadgen [flags]
+```
+
+### 6.2 Flags
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--rate` | int | 100 | Target logs per second |
+| `--duration` | duration | 60s | How long to run |
+| `--ingestor` | string | `http://localhost:8081` | Ingestor URL |
+| `--service` | string | `payment-api` | Service name in generated logs |
+| `--level` | string | `mixed` | `mixed` (weighted), `INFO`, `ERROR`, `DEBUG`, `WARN`, `FATAL` |
+| `--message-len` | int | 50 | Average message length (randomized ±50%) |
+| `--trace-id` | bool | true | Include random trace IDs |
+| `--ip` | bool | true | Include random IPs |
+
+### 6.3 Examples
+
+**Basic run:**
+```bash
+go run ./cmd/loadgen --rate=500 --duration=5m
+```
+
+**High-volume stress test:**
+```bash
+go run ./cmd/loadgen --rate=5000 --duration=10m --level=mixed --service=payment-api
+```
+
+**Error-only flood:**
+```bash
+go run ./cmd/loadgen --rate=100 --duration=1m --level=ERROR
+```
+
+### 6.4 Output
+
+```
+Load Generator
+==============
+Target Rate:     500 logs/sec
+Duration:        5m0s
+Service:         payment-api
+Level:           mixed
+
+Starting in 3s...
+
+[00:30] 15000 logs sent | 498.2 req/s | p50: 8ms | p99: 32ms
+[01:00] 30000 logs sent | 501.1 req/s | p50: 7ms | p99: 28ms
+...
+
+Done.
+Total:    150000 logs
+Success:  150000
+Failed:   0
+Avg Rate: 499.8 req/s
+p50 Lat:  8ms
+p99 Lat:  31ms
+```
+
+### 6.5 Log Generation Rules
+
+When `--level=mixed`:
+
+| Level | Weight |
+|-------|--------|
+| `INFO` | 70% |
+| `DEBUG` | 15% |
+| `WARN` | 10% |
+| `ERROR` | 4% |
+| `FATAL` | 1% |
+
+Messages are randomly generated from a pool of realistic templates:
+- `"Request completed in {n}ms"`
+- `"DB connection timeout after {n}s"`
+- `"Cache miss for key {key}"`
+- `"HTTP {code} from upstream"`
+- `"JWT validation failed"`
+
+---
+
+## 7. Error Code Reference
+
+| Code | HTTP | Meaning |
+|------|------|---------|
+| `VALIDATION_ERROR` | 400 | Request body failed schema validation |
+| `NOT_FOUND` | 404 | Requested resource does not exist |
+| `RATE_LIMITED` | 429 | Too many requests from this client |
+| `KAFKA_UNAVAILABLE` | 503 | Kafka broker unreachable |
+| `POSTGRES_UNAVAILABLE` | 503 | PostgreSQL unreachable |
+| `ELASTICSEARCH_ERROR` | 503 | Elasticsearch query failed |
+| `REDIS_UNAVAILABLE` | 503 | Redis unreachable |
+| `INTERNAL_ERROR` | 500 | Unexpected server error |
+
+---
+
+## 8. Changelog
+
+| Version | Date | Changes |
+|---------|------|---------|
+| 1.0 | 2026-08-06 | Initial specification |
+
+---
+
+*This document is the contract for all public interfaces. Any change to endpoints, fields, or CLI commands requires updating this file and recording the reason in `07-development-log.md`.*

@@ -1,0 +1,17 @@
+services:
+  kafka:
+    ...
+
+  elasticsearch:
+    ...
+
+  kibana:
+    ...
+
+volumes:
+  kafka-data:
+  elasticsearch-data:
+
+networks:
+  log-network:
+    driver: bridge
