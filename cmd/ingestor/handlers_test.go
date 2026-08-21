@@ -150,3 +150,38 @@ func TestIngestLogs_KafkaError(t *testing.T) {
 		t.Fatalf("expected status 503, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
+
+func TestSwaggerEndpoints(t *testing.T) {
+	mockProducer := kafka.NewMockProducer()
+	h := NewHandler(mockProducer)
+	router := NewRouter(h)
+
+	// 1. Test doc.json endpoint
+	reqDoc := httptest.NewRequest(http.MethodGet, "/swagger/doc.json", nil)
+	recDoc := httptest.NewRecorder()
+	router.ServeHTTP(recDoc, reqDoc)
+
+	if recDoc.Code != http.StatusOK {
+		t.Errorf("expected status 200 for doc.json, got %d", recDoc.Code)
+	}
+
+	var swaggerDoc map[string]interface{}
+	if err := json.Unmarshal(recDoc.Body.Bytes(), &swaggerDoc); err != nil {
+		t.Fatalf("failed to parse swagger doc.json: %v", err)
+	}
+	if swaggerDoc["swagger"] != "2.0" {
+		t.Errorf("expected swagger version '2.0', got %v", swaggerDoc["swagger"])
+	}
+
+	// 2. Test index.html endpoint
+	reqUI := httptest.NewRequest(http.MethodGet, "/swagger/index.html", nil)
+	recUI := httptest.NewRecorder()
+	router.ServeHTTP(recUI, reqUI)
+
+	if recUI.Code != http.StatusOK {
+		t.Errorf("expected status 200 for index.html, got %d", recUI.Code)
+	}
+	if !bytes.Contains(recUI.Body.Bytes(), []byte("swagger-ui")) {
+		t.Errorf("expected index.html to contain 'swagger-ui'")
+	}
+}

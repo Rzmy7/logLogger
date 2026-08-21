@@ -1,0 +1,126 @@
+basePath: /
+definitions:
+  main.ErrorResponse:
+    properties:
+      error:
+        properties:
+          code:
+            type: string
+          details:
+            items:
+              $ref: '#/definitions/main.ValidationErrorDetail'
+            type: array
+          message:
+            type: string
+        type: object
+      meta:
+        $ref: '#/definitions/main.ResponseMeta'
+    type: object
+  main.IngestSuccessData:
+    properties:
+      request_id:
+        type: string
+      status:
+        type: string
+      trace_id:
+        type: string
+    type: object
+  main.IngestSuccessResponse:
+    properties:
+      data:
+        $ref: '#/definitions/main.IngestSuccessData'
+      meta:
+        $ref: '#/definitions/main.ResponseMeta'
+    type: object
+  main.LogPayload:
+    properties:
+      ip:
+        type: string
+      level:
+        type: string
+      message:
+        type: string
+      service:
+        type: string
+      timestamp:
+        type: string
+      trace_id:
+        type: string
+    type: object
+  main.ResponseMeta:
+    properties:
+      request_id:
+        type: string
+      timestamp:
+        type: string
+    type: object
+  main.ValidationErrorDetail:
+    properties:
+      field:
+        type: string
+      message:
+        type: string
+    type: object
+host: localhost:8081
+info:
+  contact:
+    email: support@loglogger.local
+    name: API Support
+  description: High-throughput log ingestion service for logLogger platform.
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+  termsOfService: http://swagger.io/terms/
+  title: Log Ingestor API
+  version: "1.0"
+paths:
+  /api/v1/logs:
+    post:
+      consumes:
+      - application/json
+      description: Accept and queue a log entry into Kafka for downstream processing
+      parameters:
+      - description: Optional client-generated request ID
+        in: header
+        name: X-Request-ID
+        type: string
+      - description: Log payload to ingest
+        in: body
+        name: payload
+        required: true
+        schema:
+          $ref: '#/definitions/main.LogPayload'
+      produces:
+      - application/json
+      responses:
+        "202":
+          description: Log queued successfully
+          schema:
+            $ref: '#/definitions/main.IngestSuccessResponse'
+        "400":
+          description: Validation error or malformed JSON
+          schema:
+            $ref: '#/definitions/main.ErrorResponse'
+        "503":
+          description: Kafka queue unavailable
+          schema:
+            $ref: '#/definitions/main.ErrorResponse'
+      summary: Ingest log message
+      tags:
+      - logs
+  /health:
+    get:
+      description: Check health status of the Ingestor service
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Health check
+      tags:
+      - health
+swagger: "2.0"

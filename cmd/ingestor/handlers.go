@@ -69,14 +69,31 @@ func NewHandler(producer kafka.Producer) *Handler {
 	}
 }
 
-// HealthCheck handles GET /health requests.
+// HealthCheck godoc
+// @Summary      Health check
+// @Description  Check health status of the Ingestor service
+// @Tags         health
+// @Produce      json
+// @Success      200  {object}  map[string]string
+// @Router       /health [get]
 func (h *Handler) HealthCheck(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(`{"status":"ok"}`))
 }
 
-// IngestLogs handles POST /api/v1/logs requests.
+// IngestLogs godoc
+// @Summary      Ingest log message
+// @Description  Accept and queue a log entry into Kafka for downstream processing
+// @Tags         logs
+// @Accept       json
+// @Produce      json
+// @Param        X-Request-ID  header    string                 false  "Optional client-generated request ID"
+// @Param        payload       body      LogPayload             true   "Log payload to ingest"
+// @Success      202           {object}  IngestSuccessResponse  "Log queued successfully"
+// @Failure      400           {object}  ErrorResponse          "Validation error or malformed JSON"
+// @Failure      503           {object}  ErrorResponse          "Kafka queue unavailable"
+// @Router       /api/v1/logs [post]
 func (h *Handler) IngestLogs(w http.ResponseWriter, r *http.Request) {
 	reqID := middleware.GetReqID(r.Context())
 	if reqID == "" {

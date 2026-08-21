@@ -7,6 +7,20 @@ import (
 	"github.com/Rzmy7/logLogger/internal/kafka"
 )
 
+// @title           Log Ingestor API
+// @version         1.0
+// @description     High-throughput log ingestion service for logLogger platform.
+// @termsOfService  http://swagger.io/terms/
+
+// @contact.name    API Support
+// @contact.email   support@loglogger.local
+
+// @license.name    MIT
+// @license.url     https://opensource.org/licenses/MIT
+
+// @host      localhost:8081
+// @BasePath  /
+
 func main() {
 	// 1. Load Configuration
 	cfg, err := config.Load()
