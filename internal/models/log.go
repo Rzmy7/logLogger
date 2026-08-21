@@ -20,3 +20,27 @@ func (l *LogMessage) ParsedTime() (time.Time, error) {
 	}
 	return t, nil
 }
+
+// LogDocument represents the document indexed into Elasticsearch (with ingested_at).
+type LogDocument struct {
+	Timestamp  string `json:"timestamp"`
+	Level      string `json:"level"`
+	Service    string `json:"service"`
+	Message    string `json:"message"`
+	TraceID    string `json:"trace_id,omitempty"`
+	IP         string `json:"ip,omitempty"`
+	IngestedAt string `json:"ingested_at"`
+}
+
+// ToDocument converts a LogMessage to an Elasticsearch LogDocument.
+func (l *LogMessage) ToDocument(ingestedAt time.Time) *LogDocument {
+	return &LogDocument{
+		Timestamp:  l.Timestamp,
+		Level:      l.Level,
+		Service:    l.Service,
+		Message:    l.Message,
+		TraceID:    l.TraceID,
+		IP:         l.IP,
+		IngestedAt: ingestedAt.UTC().Format(time.RFC3339Nano),
+	}
+}

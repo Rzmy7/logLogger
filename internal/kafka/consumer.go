@@ -68,7 +68,9 @@ func (c *Consumer) Start(ctx context.Context, handler MessageHandler) error {
 
 		if err := handler(ctx, msg); err != nil {
 			log.Printf("[WARN] Handler error processing message at offset %d: %v", msg.Offset, err)
-			// Continue or DLQ in future steps; commit to avoid head-of-line blocking if required
+			// Do not commit offset on processing failure so message can be reprocessed
+			time.Sleep(500 * time.Millisecond)
+			continue
 		}
 
 		if err := c.reader.CommitMessages(ctx, msg); err != nil {
