@@ -2,23 +2,26 @@ package main
 
 import (
 	"log"
-	"net/http"
 
-	"github.com/go-chi/chi/v5"
+	"github.com/Rzmy7/logLogger/internal/config"
 )
 
 func main() {
-
-	r := chi.NewRouter()
-
-	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"status":"ok"}`))
-	})
-
-	log.Println("Ingestor starting on :8081")
-
-	err := http.ListenAndServe(":8081", r)
+	// 1. Load Configuration
+	cfg, err := config.Load()
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("Failed to load configuration: %v", err)
+	}
+
+	// 2. Initialize Handlers
+	h := NewHandler()
+
+	// 3. Initialize Router
+	r := NewRouter(h)
+
+	// 4. Initialize & Start HTTP Server
+	srv := NewServer(":"+cfg.HTTPPort, r)
+	if err := srv.Start(); err != nil {
+		log.Fatalf("Server error: %v", err)
 	}
 }
