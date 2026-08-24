@@ -291,6 +291,7 @@ go build -o bin/loadgen ./cmd/loadgen
 | [`docs/05-sequence-diagrams.md`](docs/05-sequence-diagrams.md) | Data flows: happy path, failures, graceful shutdown |
 | [`docs/06-runbook.md`](docs/06-runbook.md) | Setup, common commands, troubleshooting |
 | [`docs/07-development-log.md`](docs/07-development-log.md) | Weekly journal (maintained during development) |
+| [`docs/08-benchmarks.md`](docs/08-benchmarks.md) | Empirical benchmark results & bottleneck analysis |
 
 ---
 

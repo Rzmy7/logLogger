@@ -24,7 +24,7 @@ func NewRunner(cfg *Config) *Runner {
 		MaxIdleConns:        500,
 		MaxIdleConnsPerHost: 200,
 		IdleConnTimeout:     90 * time.Second,
-		DisableCompression: true,
+		DisableCompression:  true,
 	}
 
 	httpClient := &http.Client{
