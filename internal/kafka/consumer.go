@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strconv"
 	"time"
 
+	"github.com/Rzmy7/logLogger/internal/metrics"
 	"github.com/Rzmy7/logLogger/internal/models"
 	kafkaGo "github.com/segmentio/kafka-go"
 )
@@ -52,9 +54,34 @@ func NewConsumer(brokers []string, groupID, topic string) (*Consumer, error) {
 	}, nil
 }
 
+// Stats returns reader statistics including consumer lag.
+func (c *Consumer) Stats() kafkaGo.ReaderStats {
+	if c.reader != nil {
+		return c.reader.Stats()
+	}
+	return kafkaGo.ReaderStats{}
+}
+
 // Start begins the message consumption loop until ctx is canceled or a fatal error occurs.
 func (c *Consumer) Start(ctx context.Context, handler MessageHandler) error {
-	log.Printf("[INFO] Starting Kafka consumer for group %q on topic %q", c.reader.Config().GroupID, c.reader.Config().Topic)
+	groupID := c.reader.Config().GroupID
+	topic := c.reader.Config().Topic
+	log.Printf("[INFO] Starting Kafka consumer for group %q on topic %q", groupID, topic)
+
+	// Periodic lag updater
+	go func() {
+		ticker := time.NewTicker(1 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				stats := c.Stats()
+				metrics.KafkaConsumerLag.WithLabelValues(topic, groupID, "total").Set(float64(stats.Lag))
+			}
+		}
+	}()
 
 	for {
 		msg, err := c.reader.FetchMessage(ctx)
@@ -71,6 +98,10 @@ func (c *Consumer) Start(ctx context.Context, handler MessageHandler) error {
 			}
 			continue
 		}
+
+		metrics.KafkaMessagesConsumedTotal.WithLabelValues(msg.Topic, groupID).Inc()
+		stats := c.Stats()
+		metrics.KafkaConsumerLag.WithLabelValues(msg.Topic, groupID, strconv.Itoa(msg.Partition)).Set(float64(stats.Lag))
 
 		if err := handler(ctx, msg); err != nil {
 			log.Printf("[WARN] Handler error processing message (topic=%s, partition=%d, offset=%d): %v", msg.Topic, msg.Partition, msg.Offset, err)

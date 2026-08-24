@@ -7,6 +7,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/Rzmy7/logLogger/internal/metrics"
 	kafkaGo "github.com/segmentio/kafka-go"
 )
 
@@ -65,10 +66,12 @@ func (p *WriterProducer) PublishToTopic(ctx context.Context, topic, key string, 
 	}
 
 	if err := p.writer.WriteMessages(ctx, msg); err != nil {
+		metrics.KafkaMessagesProducedTotal.WithLabelValues(topic, "error").Inc()
 		log.Printf("[ERROR] Failed to publish message to Kafka topic %q: %v", topic, err)
 		return fmt.Errorf("kafka publish error: %w", err)
 	}
 
+	metrics.KafkaMessagesProducedTotal.WithLabelValues(topic, "success").Inc()
 	return nil
 }
 

@@ -3,6 +3,7 @@ package main
 import (
 	"net/http"
 
+	"github.com/Rzmy7/logLogger/internal/metrics"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 )
@@ -15,8 +16,12 @@ func NewRouter(h *Handler) http.Handler {
 	r.Use(middleware.RequestID)
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
+	r.Use(metrics.HTTPMetricsMiddleware("analytics"))
 
-	// Routes
+	// Prometheus metrics endpoint
+	r.Handle("/metrics", metrics.Handler())
+
+	// Application Routes
 	r.Get("/health", h.HealthCheck)
 	r.Get("/metrics/live", h.LiveMetrics)
 	r.Get("/metrics/top-errors", h.TopErrors)

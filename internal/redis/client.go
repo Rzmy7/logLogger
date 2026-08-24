@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Rzmy7/logLogger/internal/metrics"
 	"github.com/Rzmy7/logLogger/internal/models"
 	redisGo "github.com/redis/go-redis/v9"
 )
@@ -88,6 +89,11 @@ func (c *Client) RecordLog(ctx context.Context, logMsg *models.LogMessage, rawJS
 		return errors.New("log message cannot be nil")
 	}
 
+	start := time.Now()
+	defer func() {
+		metrics.RedisOperationDuration.WithLabelValues("record_log").Observe(time.Since(start).Seconds())
+	}()
+
 	pipe := c.rdb.Pipeline()
 
 	// 1. Total logs counter (String)
@@ -133,9 +139,11 @@ func (c *Client) RecordLog(ctx context.Context, logMsg *models.LogMessage, rawJS
 	}
 
 	if _, err := pipe.Exec(ctx); err != nil {
+		metrics.RedisOperationsTotal.WithLabelValues("record_log", "error").Inc()
 		return fmt.Errorf("failed to record Redis metrics: %w", err)
 	}
 
+	metrics.RedisOperationsTotal.WithLabelValues("record_log", "success").Inc()
 	return nil
 }
 

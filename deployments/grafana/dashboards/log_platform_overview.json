@@ -1,0 +1,190 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": true,
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "id": 100,
+      "title": "Ingestion & Processing Throughput",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "axisCenteredZero": false, "drawStyle": "line", "fillOpacity": 15, "lineWidth": 2 },
+          "unit": "reqps"
+        }
+      },
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 1 },
+      "id": 1,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        { "expr": "sum(rate(log_platform_http_requests_total{service=\"ingestor\"}[1m]))", "legendFormat": "HTTP Ingestion (req/s)", "refId": "A" },
+        { "expr": "sum(rate(log_platform_kafka_messages_consumed_total[1m]))", "legendFormat": "Processor Consumption (msg/s)", "refId": "B" }
+      ],
+      "title": "Pipeline Throughput",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] },
+          "unit": "short"
+        }
+      },
+      "gridPos": { "h": 7, "w": 4, "x": 8, "y": 1 },
+      "id": 2,
+      "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
+      "targets": [
+        { "expr": "sum(log_platform_kafka_consumer_lag)", "legendFormat": "Consumer Lag", "refId": "A" }
+      ],
+      "title": "Kafka Consumer Lag",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 1 }, { "color": "red", "value": 5 }] },
+          "unit": "short"
+        }
+      },
+      "gridPos": { "h": 7, "w": 4, "x": 12, "y": 1 },
+      "id": 3,
+      "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
+      "targets": [
+        { "expr": "sum(log_platform_kafka_dlq_messages_total)", "legendFormat": "DLQ Messages", "refId": "A" }
+      ],
+      "title": "DLQ Message Count",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "axisCenteredZero": false, "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2 },
+          "unit": "percentunit"
+        }
+      },
+      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 1 },
+      "id": 4,
+      "targets": [
+        { "expr": "sum(rate(log_platform_http_errors_total[1m])) / (sum(rate(log_platform_http_requests_total[1m])) > 0 or 1)", "legendFormat": "HTTP Error Rate", "refId": "A" }
+      ],
+      "title": "Ingestion Error Rate",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 8 },
+      "id": 101,
+      "title": "Latency Profiles",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "axisCenteredZero": false, "drawStyle": "line", "fillOpacity": 15, "lineWidth": 2 },
+          "unit": "s"
+        }
+      },
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 9 },
+      "id": 5,
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum(rate(log_platform_http_request_duration_seconds_bucket{service=\"ingestor\"}[1m])) by (le))", "legendFormat": "Ingestion p50", "refId": "A" },
+        { "expr": "histogram_quantile(0.95, sum(rate(log_platform_http_request_duration_seconds_bucket{service=\"ingestor\"}[1m])) by (le))", "legendFormat": "Ingestion p95", "refId": "B" },
+        { "expr": "histogram_quantile(0.99, sum(rate(log_platform_http_request_duration_seconds_bucket{service=\"ingestor\"}[1m])) by (le))", "legendFormat": "Ingestion p99", "refId": "C" }
+      ],
+      "title": "HTTP Ingestion Latency (p50 / p95 / p99)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "axisCenteredZero": false, "drawStyle": "line", "fillOpacity": 15, "lineWidth": 2 },
+          "unit": "s"
+        }
+      },
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 9 },
+      "id": 6,
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum(rate(log_platform_processor_processing_duration_seconds_bucket[1m])) by (le))", "legendFormat": "Processing p50", "refId": "A" },
+        { "expr": "histogram_quantile(0.95, sum(rate(log_platform_processor_processing_duration_seconds_bucket[1m])) by (le))", "legendFormat": "Processing p95", "refId": "B" },
+        { "expr": "histogram_quantile(0.99, sum(rate(log_platform_processor_processing_duration_seconds_bucket[1m])) by (le))", "legendFormat": "Processing p99", "refId": "C" }
+      ],
+      "title": "Processor Dual-Sink Latency (p50 / p95 / p99)",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 16 },
+      "id": 102,
+      "title": "Storage Sinks (Elasticsearch & Redis)",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "axisCenteredZero": false, "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2 },
+          "unit": "ops"
+        }
+      },
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 17 },
+      "id": 7,
+      "targets": [
+        { "expr": "sum(rate(log_platform_elasticsearch_indexing_total[1m])) by (status)", "legendFormat": "Elasticsearch Indexing ({{status}})", "refId": "A" },
+        { "expr": "histogram_quantile(0.95, sum(rate(log_platform_elasticsearch_indexing_duration_seconds_bucket[1m])) by (le))", "legendFormat": "ES Index Latency p95", "refId": "B" }
+      ],
+      "title": "Elasticsearch Indexing Operations",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "axisCenteredZero": false, "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2 },
+          "unit": "ops"
+        }
+      },
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 17 },
+      "id": 8,
+      "targets": [
+        { "expr": "sum(rate(log_platform_redis_operations_total[1m])) by (status)", "legendFormat": "Redis Op ({{status}})", "refId": "A" },
+        { "expr": "histogram_quantile(0.95, sum(rate(log_platform_redis_operation_duration_seconds_bucket[1m])) by (le))", "legendFormat": "Redis Latency p95", "refId": "B" }
+      ],
+      "title": "Redis Real-Time Metric Operations",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "2s",
+  "schemaVersion": 38,
+  "style": "dark",
+  "tags": ["log-platform", "observability"],
+  "time": { "from": "now-15m", "to": "now" },
+  "timepicker": { "refresh_intervals": ["1s", "2s", "5s", "10s", "30s", "1m"] },
+  "timezone": "browser",
+  "title": "Log Platform Overview",
+  "uid": "log-platform-overview",
+  "version": 1
+}

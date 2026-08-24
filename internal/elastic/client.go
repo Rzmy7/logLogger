@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Rzmy7/logLogger/internal/metrics"
 	"github.com/Rzmy7/logLogger/internal/models"
 	elasticsearch "github.com/elastic/go-elasticsearch/v8"
 )
@@ -177,6 +178,11 @@ func (c *Client) IndexLog(ctx context.Context, logMsg *models.LogMessage, ingest
 		return errors.New("log message cannot be nil")
 	}
 
+	start := time.Now()
+	defer func() {
+		metrics.ElasticsearchIndexingDuration.Observe(time.Since(start).Seconds())
+	}()
+
 	t, err := logMsg.ParsedTime()
 	if err != nil {
 		t = ingestedAt
@@ -186,6 +192,7 @@ func (c *Client) IndexLog(ctx context.Context, logMsg *models.LogMessage, ingest
 	doc := logMsg.ToDocument(ingestedAt)
 	docBytes, err := json.Marshal(doc)
 	if err != nil {
+		metrics.ElasticsearchIndexingTotal.WithLabelValues("error").Inc()
 		return fmt.Errorf("failed to serialize log document: %w", err)
 	}
 
@@ -195,15 +202,18 @@ func (c *Client) IndexLog(ctx context.Context, logMsg *models.LogMessage, ingest
 		c.es.Index.WithContext(ctx),
 	)
 	if err != nil {
+		metrics.ElasticsearchIndexingTotal.WithLabelValues("error").Inc()
 		return fmt.Errorf("failed to index document: %w", err)
 	}
 	defer res.Body.Close()
 
 	if res.IsError() {
+		metrics.ElasticsearchIndexingTotal.WithLabelValues("error").Inc()
 		body, _ := io.ReadAll(res.Body)
 		return fmt.Errorf("elasticsearch index error on %s: %s (%s)", indexName, res.Status(), string(body))
 	}
 
+	metrics.ElasticsearchIndexingTotal.WithLabelValues("success").Inc()
 	return nil
 }
 

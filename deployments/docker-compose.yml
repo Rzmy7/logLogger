@@ -72,11 +72,44 @@ services:
     networks:
       - log-network
 
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    container_name: log-platform-prometheus-1
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - log-network
+
+  grafana:
+    image: grafana/grafana:10.4.0
+    container_name: log-platform-grafana-1
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - ./grafana/dashboards:/var/lib/grafana/dashboards
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    networks:
+      - log-network
+
 volumes:
   kafka-data:
   redis-data:
   postgres-data:
   elasticsearch-data:
+  prometheus-data:
+  grafana-data:
 
 networks:
   log-network:
