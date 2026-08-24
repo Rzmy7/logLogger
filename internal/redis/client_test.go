@@ -18,6 +18,7 @@ func TestNewClient_Validation(t *testing.T) {
 func TestMockMetricsRecorder_HappyPath(t *testing.T) {
 	mock := NewMockMetricsRecorder()
 	var _ MetricsRecorder = mock
+	var _ MetricsReader = mock
 
 	ctx := context.Background()
 
@@ -40,34 +41,34 @@ func TestMockMetricsRecorder_HappyPath(t *testing.T) {
 		t.Errorf("expected stats:logs:total to be 1, got %d", count)
 	}
 
-	// Verify service logs
-	if count := mock.Counters["stats:logs:payment-api"]; count != 1 {
-		t.Errorf("expected stats:logs:payment-api to be 1, got %d", count)
+	// Query live metrics
+	total, services, err := mock.GetLiveMetrics(ctx, []string{"payment-api"})
+	if err != nil {
+		t.Fatalf("unexpected GetLiveMetrics error: %v", err)
+	}
+	if total != 1 {
+		t.Errorf("expected total 1, got %d", total)
+	}
+	if services["payment-api"].TotalLogs != 1 {
+		t.Errorf("expected payment-api total logs 1, got %d", services["payment-api"].TotalLogs)
 	}
 
-	// Verify level logs
-	if count := mock.Counters["stats:logs:level:error"]; count != 1 {
-		t.Errorf("expected stats:logs:level:error to be 1, got %d", count)
+	// Query top errors
+	topErrors, err := mock.GetTopErrors(ctx, 5)
+	if err != nil {
+		t.Fatalf("unexpected GetTopErrors error: %v", err)
+	}
+	if len(topErrors) != 1 || topErrors[0].Message != "Gateway timeout" {
+		t.Errorf("expected 1 top error with message 'Gateway timeout', got %v", topErrors)
 	}
 
-	// Verify service leaderboard
-	if score := mock.Leaderboards["leaderboard:services"]["payment-api"]; score != 1 {
-		t.Errorf("expected leaderboard:services payment-api score to be 1, got %f", score)
+	// Query top services
+	topServices, err := mock.GetTopServices(ctx, 5)
+	if err != nil {
+		t.Fatalf("unexpected GetTopServices error: %v", err)
 	}
-
-	// Verify error counters
-	if count := mock.Counters["stats:errors:payment-api"]; count != 1 {
-		t.Errorf("expected stats:errors:payment-api to be 1, got %d", count)
-	}
-
-	// Verify error leaderboard
-	if score := mock.Leaderboards["leaderboard:errors"]["Gateway timeout"]; score != 1 {
-		t.Errorf("expected leaderboard:errors score 1, got %f", score)
-	}
-
-	// Verify recent errors list
-	if len(mock.Lists["recent:errors:payment-api"]) != 1 {
-		t.Fatalf("expected 1 recent error, got %d", len(mock.Lists["recent:errors:payment-api"]))
+	if len(topServices) != 1 || topServices[0].Service != "payment-api" {
+		t.Errorf("expected 1 top service 'payment-api', got %v", topServices)
 	}
 
 	// Test error simulation

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"strings"
 	"time"
 
@@ -61,10 +62,37 @@ const IndexTemplateDefinition = `{
   }
 }`
 
+// SearchParams encapsulates query parameters for searching logs.
+type SearchParams struct {
+	Query   string
+	Service string
+	Level   string
+	TraceID string
+	From    string
+	To      string
+	Page    int
+	Size    int
+}
+
+// SearchResult holds paginated log results.
+type SearchResult struct {
+	Total int64                 `json:"total"`
+	Page  int                   `json:"page"`
+	Size  int                   `json:"size"`
+	Pages int                   `json:"pages"`
+	Logs  []*models.LogDocument `json:"logs"`
+}
+
 // Indexer defines the contract for indexing documents into Elasticsearch.
 type Indexer interface {
 	EnsureTemplate(ctx context.Context) error
 	IndexLog(ctx context.Context, logMsg *models.LogMessage, ingestedAt time.Time) error
+	Ping(ctx context.Context) error
+}
+
+// Searcher defines the contract for querying logs from Elasticsearch.
+type Searcher interface {
+	SearchLogs(ctx context.Context, params SearchParams) (*SearchResult, error)
 	Ping(ctx context.Context) error
 }
 
@@ -80,7 +108,12 @@ func NewClient(esURL string) (*Client, error) {
 	}
 
 	cfg := elasticsearch.Config{
-		Addresses: []string{esURL},
+		Addresses:     []string{esURL},
+		MaxRetries:    3,
+		RetryOnStatus: []int{502, 503, 504},
+		RetryBackoff: func(attempt int) time.Duration {
+			return time.Duration(attempt*100) * time.Millisecond
+		},
 	}
 
 	es, err := elasticsearch.NewClient(cfg)
@@ -105,26 +138,37 @@ func (c *Client) Ping(ctx context.Context) error {
 	return nil
 }
 
-// EnsureTemplate creates or updates the logs-v1-template index template.
+// EnsureTemplate creates or updates the logs-v1-template index template with retry backoff.
 func (c *Client) EnsureTemplate(ctx context.Context) error {
-	req := strings.NewReader(IndexTemplateDefinition)
-	res, err := c.es.Indices.PutIndexTemplate(
-		TemplateName,
-		req,
-		c.es.Indices.PutIndexTemplate.WithContext(ctx),
-	)
-	if err != nil {
-		return fmt.Errorf("failed to create index template: %w", err)
-	}
-	defer res.Body.Close()
+	var lastErr error
 
-	if res.IsError() {
-		body, _ := io.ReadAll(res.Body)
-		return fmt.Errorf("error creating index template %s: %s (%s)", TemplateName, res.Status(), string(body))
+	for attempt := 1; attempt <= 3; attempt++ {
+		req := strings.NewReader(IndexTemplateDefinition)
+		res, err := c.es.Indices.PutIndexTemplate(
+			TemplateName,
+			req,
+			c.es.Indices.PutIndexTemplate.WithContext(ctx),
+		)
+		if err == nil {
+			defer res.Body.Close()
+			if !res.IsError() {
+				log.Printf("[INFO] Elasticsearch index template %q verified/created successfully", TemplateName)
+				return nil
+			}
+			body, _ := io.ReadAll(res.Body)
+			lastErr = fmt.Errorf("error creating index template %s: %s (%s)", TemplateName, res.Status(), string(body))
+		} else {
+			lastErr = err
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Duration(attempt) * 200 * time.Millisecond):
+		}
 	}
 
-	log.Printf("[INFO] Elasticsearch index template %q verified/created successfully", TemplateName)
-	return nil
+	return fmt.Errorf("failed to ensure template after retries: %w", lastErr)
 }
 
 // IndexLog indexes a single log document into the appropriate daily index (logs-v1-YYYY.MM.DD).
@@ -161,6 +205,149 @@ func (c *Client) IndexLog(ctx context.Context, logMsg *models.LogMessage, ingest
 	}
 
 	return nil
+}
+
+// SearchLogs executes full-text search and filtering queries on logs-v1-* indices.
+func (c *Client) SearchLogs(ctx context.Context, params SearchParams) (*SearchResult, error) {
+	page := params.Page
+	if page <= 0 {
+		page = 1
+	}
+	size := params.Size
+	if size <= 0 {
+		size = 20
+	}
+	if size > 100 {
+		size = 100
+	}
+	fromOffset := (page - 1) * size
+
+	// Build bool query
+	boolQuery := make(map[string]any)
+	var mustClauses []any
+	var filterClauses []any
+
+	if params.Query != "" && params.Query != "*" {
+		mustClauses = append(mustClauses, map[string]any{
+			"match": map[string]any{
+				"message": params.Query,
+			},
+		})
+	} else {
+		mustClauses = append(mustClauses, map[string]any{
+			"match_all": map[string]any{},
+		})
+	}
+
+	if params.Service != "" {
+		filterClauses = append(filterClauses, map[string]any{
+			"term": map[string]any{
+				"service": params.Service,
+			},
+		})
+	}
+
+	if params.Level != "" {
+		filterClauses = append(filterClauses, map[string]any{
+			"term": map[string]any{
+				"level": strings.ToUpper(params.Level),
+			},
+		})
+	}
+
+	if params.TraceID != "" {
+		filterClauses = append(filterClauses, map[string]any{
+			"term": map[string]any{
+				"trace_id": params.TraceID,
+			},
+		})
+	}
+
+	if params.From != "" || params.To != "" {
+		rangeFilter := make(map[string]any)
+		if params.From != "" {
+			rangeFilter["gte"] = params.From
+		}
+		if params.To != "" {
+			rangeFilter["lte"] = params.To
+		}
+		filterClauses = append(filterClauses, map[string]any{
+			"range": map[string]any{
+				"timestamp": rangeFilter,
+			},
+		})
+	}
+
+	boolQuery["must"] = mustClauses
+	if len(filterClauses) > 0 {
+		boolQuery["filter"] = filterClauses
+	}
+
+	queryBody := map[string]any{
+		"query": map[string]any{
+			"bool": boolQuery,
+		},
+		"sort": []any{
+			map[string]any{"timestamp": "desc"},
+		},
+		"from": fromOffset,
+		"size": size,
+	}
+
+	queryJSON, err := json.Marshal(queryBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode search query: %w", err)
+	}
+
+	res, err := c.es.Search(
+		c.es.Search.WithContext(ctx),
+		c.es.Search.WithIndex(IndexPattern),
+		c.es.Search.WithBody(bytes.NewReader(queryJSON)),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to perform search: %w", err)
+	}
+	defer res.Body.Close()
+
+	if res.IsError() {
+		body, _ := io.ReadAll(res.Body)
+		return nil, fmt.Errorf("elasticsearch search error: %s (%s)", res.Status(), string(body))
+	}
+
+	var esResp struct {
+		Hits struct {
+			Total struct {
+				Value int64 `json:"value"`
+			} `json:"total"`
+			Hits []struct {
+				Source models.LogDocument `json:"_source"`
+			} `json:"hits"`
+		} `json:"hits"`
+	}
+
+	if err := json.NewDecoder(res.Body).Decode(&esResp); err != nil {
+		return nil, fmt.Errorf("failed to decode search response: %w", err)
+	}
+
+	total := esResp.Hits.Total.Value
+	pages := int(math.Ceil(float64(total) / float64(size)))
+	if pages == 0 {
+		pages = 1
+	}
+
+	logs := make([]*models.LogDocument, 0, len(esResp.Hits.Hits))
+	for _, hit := range esResp.Hits.Hits {
+		doc := hit.Source
+		logs = append(logs, &doc)
+	}
+
+	return &SearchResult{
+		Total: total,
+		Page:  page,
+		Size:  size,
+		Pages: pages,
+		Logs:  logs,
+	}, nil
 }
 
 // IndexNameForTime generates the daily index name logs-v1-YYYY.MM.DD for a given timestamp.

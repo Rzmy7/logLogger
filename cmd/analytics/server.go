@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-// Server wraps http.Server with graceful shutdown support.
+// Server wraps http.Server with graceful shutdown support for Analytics API.
 type Server struct {
 	httpServer *http.Server
 }
@@ -39,7 +39,7 @@ func (s *Server) Start() error {
 		signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 		<-quit
 
-		log.Println("Shutting down ingestor server...")
+		log.Println("Shutting down analytics server...")
 
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -47,7 +47,7 @@ func (s *Server) Start() error {
 		shutdownError <- s.httpServer.Shutdown(ctx)
 	}()
 
-	log.Printf("Ingestor server starting on %s\n", s.httpServer.Addr)
+	log.Printf("Analytics server starting on %s\n", s.httpServer.Addr)
 
 	err := s.httpServer.ListenAndServe()
 	if !errors.Is(err, http.ErrServerClosed) {
@@ -59,6 +59,6 @@ func (s *Server) Start() error {
 		return err
 	}
 
-	log.Println("Ingestor server stopped cleanly")
+	log.Println("Analytics server stopped cleanly")
 	return nil
 }

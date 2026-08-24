@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -11,7 +12,7 @@ import (
 	"github.com/Rzmy7/logLogger/internal/models"
 )
 
-// MockMetricsRecorder is an in-memory fake for MetricsRecorder interface.
+// MockMetricsRecorder is an in-memory fake for MetricsRecorder and MetricsReader interfaces.
 type MockMetricsRecorder struct {
 	mu           sync.Mutex
 	Counters     map[string]int64
@@ -104,4 +105,90 @@ func (m *MockMetricsRecorder) RecordLog(ctx context.Context, logMsg *models.LogM
 	}
 
 	return nil
+}
+
+// GetLiveMetrics returns mock live metrics.
+func (m *MockMetricsRecorder) GetLiveMetrics(ctx context.Context, requestedServices []string) (int64, map[string]ServiceMetrics, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.Err != nil {
+		return 0, nil, m.Err
+	}
+
+	total := m.Counters["stats:logs:total"]
+	res := make(map[string]ServiceMetrics)
+
+	services := requestedServices
+	if len(services) == 0 || (len(services) == 1 && (services[0] == "" || services[0] == "all")) {
+		for svc := range m.Leaderboards["leaderboard:services"] {
+			services = append(services, svc)
+		}
+	}
+
+	for _, svc := range services {
+		res[svc] = ServiceMetrics{
+			TotalLogs:    m.Counters[fmt.Sprintf("stats:logs:%s", svc)],
+			TotalErrors:  m.Counters[fmt.Sprintf("stats:errors:%s", svc)],
+			ErrorsLast5m: m.Counters[fmt.Sprintf("stats:errors:last_5m:%s", svc)],
+		}
+	}
+
+	return total, res, nil
+}
+
+// GetTopErrors returns top n errors.
+func (m *MockMetricsRecorder) GetTopErrors(ctx context.Context, n int) ([]TopErrorItem, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.Err != nil {
+		return nil, m.Err
+	}
+
+	var items []TopErrorItem
+	for msg, count := range m.Leaderboards["leaderboard:errors"] {
+		items = append(items, TopErrorItem{
+			Message: msg,
+			Count:   int64(count),
+		})
+	}
+
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].Count > items[j].Count
+	})
+
+	if len(items) > n {
+		items = items[:n]
+	}
+
+	return items, nil
+}
+
+// GetTopServices returns top n services.
+func (m *MockMetricsRecorder) GetTopServices(ctx context.Context, n int) ([]TopServiceItem, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.Err != nil {
+		return nil, m.Err
+	}
+
+	var items []TopServiceItem
+	for svc, count := range m.Leaderboards["leaderboard:services"] {
+		items = append(items, TopServiceItem{
+			Service: svc,
+			Count:   int64(count),
+		})
+	}
+
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].Count > items[j].Count
+	})
+
+	if len(items) > n {
+		items = items[:n]
+	}
+
+	return items, nil
 }

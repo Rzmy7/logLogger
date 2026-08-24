@@ -43,7 +43,7 @@ func NewConsumer(brokers []string, groupID, topic string) (*Consumer, error) {
 		Topic:          topic,
 		MinBytes:       10e3, // 10KB
 		MaxBytes:       10e6, // 10MB
-		CommitInterval: time.Second,
+		CommitInterval: 0,    // Explicit manual commit only
 		StartOffset:    kafkaGo.FirstOffset,
 	})
 
@@ -59,22 +59,34 @@ func (c *Consumer) Start(ctx context.Context, handler MessageHandler) error {
 	for {
 		msg, err := c.reader.FetchMessage(ctx)
 		if err != nil {
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil {
 				log.Println("[INFO] Consumer context canceled, stopping read loop")
 				return nil
 			}
-			return fmt.Errorf("error fetching message: %w", err)
+			log.Printf("[ERROR] Error fetching message from Kafka: %v", err)
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(500 * time.Millisecond):
+			}
+			continue
 		}
 
 		if err := handler(ctx, msg); err != nil {
-			log.Printf("[WARN] Handler error processing message at offset %d: %v", msg.Offset, err)
-			// Do not commit offset on processing failure so message can be reprocessed
-			time.Sleep(500 * time.Millisecond)
+			log.Printf("[WARN] Handler error processing message (topic=%s, partition=%d, offset=%d): %v", msg.Topic, msg.Partition, msg.Offset, err)
+			// Reset offset so the message is not skipped upon next fetch
+			_ = c.reader.SetOffset(msg.Offset)
+
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(1 * time.Second):
+			}
 			continue
 		}
 
 		if err := c.reader.CommitMessages(ctx, msg); err != nil {
-			if errors.Is(err, context.Canceled) {
+			if errors.Is(err, context.Canceled) || ctx.Err() != nil {
 				return nil
 			}
 			log.Printf("[ERROR] Failed to commit offset %d: %v", msg.Offset, err)

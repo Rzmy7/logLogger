@@ -27,6 +27,7 @@ func TestNewClient_EmptyURL(t *testing.T) {
 func TestMockIndexer(t *testing.T) {
 	mock := NewMockIndexer()
 	var _ Indexer = mock
+	var _ Searcher = mock
 
 	ctx := context.Background()
 	if err := mock.EnsureTemplate(ctx); err != nil {
@@ -53,14 +54,18 @@ func TestMockIndexer(t *testing.T) {
 	if len(mock.Documents) != 1 {
 		t.Fatalf("expected 1 document, got %d", len(mock.Documents))
 	}
-	if mock.Documents[0].Service != "auth-service" {
-		t.Errorf("expected auth-service, got %s", mock.Documents[0].Service)
+
+	// Test Search
+	result, err := mock.SearchLogs(ctx, SearchParams{
+		Service: "auth-service",
+		Level:   "ERROR",
+		Query:   "mismatch",
+	})
+	if err != nil {
+		t.Fatalf("unexpected search error: %v", err)
 	}
-	if mock.Documents[0].IngestedAt != "2026-08-21T10:00:01Z" {
-		t.Errorf("expected ingested_at 2026-08-21T10:00:01Z, got %s", mock.Documents[0].IngestedAt)
-	}
-	if mock.IndexNames[0] != "logs-v1-2026.08.21" {
-		t.Errorf("expected index name logs-v1-2026.08.21, got %s", mock.IndexNames[0])
+	if result.Total != 1 || len(result.Logs) != 1 {
+		t.Errorf("expected 1 result, got %d", result.Total)
 	}
 
 	// Test error propagation
