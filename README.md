@@ -11,45 +11,44 @@
 
 ## 🏗️ Architecture & Data Flow
 
+```mermaid
+flowchart TD
+    Client["Client / Log Producer"] -- "HTTP POST /api/v1/logs" --> Ingestor["Ingestor API (:8081)"]
+    Ingestor -- "Publish to topic 'app-logs'" --> Kafka[("Apache Kafka (KRaft)")]
+    
+    Kafka -- "Consume 'app-logs'" --> Processor["Stream Processor (:8083)"]
+    
+    Processor -- "Valid Document" --> ES[("Elasticsearch\n(logs-v1-YYYY.MM.DD)")]
+    Processor -- "Real-time Metrics" --> Redis[("Redis Metrics Store")]
+    Processor -- "Malformed / Invalid" --> DLQ[("Kafka DLQ Topic\n(app-logs-dlq)")]
+    
+    Retention["Retention Service (:8084)\n(Periodic Runner)"] -- "Index Lifecycle\n(Delete Expired Indices)" --> ES
+    
+    Analytics["Analytics API (:8082)\n(/search, /metrics, /admin)"] -- "Full-Text Search" --> ES
+    Analytics -- "Sub-10ms Aggregations" --> Redis
+    Analytics -- "Admin Index Lifecycle" --> ES
+    
+    Prometheus[("Prometheus (:9090)")] -- "Scrape :8081, :8082, :8083, :8084" --> Ingestor
+    Prometheus --> Processor
+    Prometheus --> Analytics
+    Prometheus --> Retention
+    
+    Grafana["Grafana Dashboard (:3000)"] -- "Visualize Telemetry" --> Prometheus
 ```
-                                  ┌───────────────────────────────────────────────────┐
-                                  │                Prometheus (:9090)                 │
-                                  │                        │                          │
-                                  │                Grafana (:3000)                    │
-                                  └───▲────────────▲───────────────▲──────────────▲───┘
-                                      │            │               │              │
-                                   scrape       scrape          scrape         scrape
-                                      │            │               │              │
-┌────────────────┐  HTTP POST   ┌─────┴────────┐   │    ┌──────────┴─────┐ ┌──────┴─────────┐
-│   Log Client   ├─────────────►│ Ingestor API │   │    │ Analytics API  │ │ Retention Svc  │
-│  (App / Agent) │  (/api/v1)   │ (:8081)      │   │    │ (:8082)        │ │ (:8084)        │
-└────────────────┘              └──────┬───────┘   │    └────▲──────▲────┘ └──────┬─────────┘
-                                       │           │         │      │             │
-                                 Publish to        │      Search   Metrics    Retention
-                                 "app-logs"        │         │      │           Runner
-                                       ▼           │         │      │             │
-                              ┌────────────────┐   │         │      │             │
-                              │  Apache Kafka  │   │         │      │             │
-                              └────────┬───────┘   │         │      │             │
-                                       │           │         │      │             │
-                                    Consume        │         │      │             │
-                                       ▼           │         │      │             │
-                              ┌────────────────┴─┐ │         │      │             │
-                              │ Stream Processor ├─┘         │      │             │
-                              │ (Metrics :8083)  │           │      │             │
-                              └───┬────────────┬─┘           │      │             │
-                                  │            │             │      │             │
-                     Parse Error  │            │ Valid Log   │      │             │
-                          ▼       │            ▼             │      │             │
-               ┌──────────────────┴─┐  ┌─────────────────┐   │      │             │
-               │   Kafka DLQ Topic  │  │  Elasticsearch  ├───┘      │◄────────────┘
-               │   (app-logs-dlq)   │  │  (logs-v1-*)    │          │  (Index Lifecycle)
-               └────────────────────┘  └─────────────────┘          │
-                                       ┌─────────────────┐          │
-                                       │   Redis Cache   ├──────────┘
-                                       │  (Real-Time)    │
-                                       └─────────────────┘
-```
+
+### Core Architecture Principles
+
+1. **Storage Boundaries & Source of Truth:**
+   - **Elasticsearch** is the sole source of truth for log documents, historical queries, and storage lifecycle.
+   - **Redis** maintains derived real-time metrics (counters, 5m sliding error windows, leaderboards). Redis is **not** responsible for raw log lifecycle, and cumulative counters are not decremented when historical ES indices expire.
+   - **PostgreSQL** is reserved strictly for future platform metadata (tenants, applications, alert rules) and is **not** in the log ingestion or processing data path.
+2. **Lifecycle Safety & Interface Decoupling:**
+   - Log lifecycle business logic is strictly encapsulated behind the `retention.Manager` interface.
+   - Administrative deletions only operate on `logs-v1-YYYY.MM.DD` formatted indices and strictly reject non-log or system indices (`.kibana`, `.security`).
+   - Today's active write index (`logs-v1-<today>`) is permanently protected from retention and manual deletion.
+3. **No Unnecessary Dependencies:** The ingestion pipeline maintains direct, lightweight streaming via Kafka without heavy unneeded dependencies.
+
+---
 
 ### End-to-End Pipeline Stages
 
@@ -312,6 +311,9 @@ curl -s "http://localhost:8082/search?q=Stripe&service=payment-api&level=ERROR&p
   }
 }
 ```
+
+> [!WARNING]
+> **Production Security & Authorization**: Administrative endpoints (`/admin/*`) are enabled for local operational management. In production environments, these endpoints MUST be protected behind an authentication and authorization layer (e.g., API Gateway, mTLS, JWT, or RBAC).
 
 ### 6. Storage Statistics & Index Information
 ```bash

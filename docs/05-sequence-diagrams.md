@@ -440,21 +440,110 @@ services:
 
 ---
 
-## 12. Glossary
+## 13. Mermaid Sequence Diagrams
 
-| Term | Definition |
-|------|------------|
-| **Happy Path** | The ideal execution flow where no errors occur |
-| **Failure Path** | The execution flow when an error or exception occurs |
-| **Dead Letter Queue (DLQ)** | A separate queue/topic for messages that cannot be processed successfully |
-| **Poison Message** | A message that causes a consumer to fail repeatedly |
-| **Offset Commit** | Telling Kafka "I have successfully processed up to this message" |
-| **Bulk API** | Elasticsearch API for indexing multiple documents in one request |
-| **Pipeline** | Redis feature to batch multiple commands into a single round-trip |
-| **Graceful Shutdown** | Shutting down a service after completing in-flight work |
-| **Derived View** | A database/cache that is computed from another source of truth |
-| **Replay** | Re-processing historical messages from Kafka |
+### 13.1 Ingestion & Dual-Sink Stream Processing
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Client as Log Client
+    participant Ingestor as Ingestor API (:8081)
+    participant Kafka as Kafka (app-logs)
+    participant Processor as Stream Processor
+    participant ES as Elasticsearch (logs-v1-*)
+    participant Redis as Redis Cache
+    participant DLQ as Kafka (app-logs-dlq)
+
+    Client->>Ingestor: POST /api/v1/logs
+    alt Invalid Schema
+        Ingestor-->>Client: 400 Bad Request
+    else Valid Schema
+        Ingestor->>Kafka: Publish message (key=trace_id/service)
+        Ingestor-->>Client: 202 Accepted (request_id, trace_id)
+    end
+
+    Kafka->>Processor: Fetch batch / message
+    alt Malformed / Poison Message
+        Processor->>DLQ: Publish to app-logs-dlq (error diagnostics)
+        Processor->>Kafka: Commit original offset
+    else Valid Event
+        par Dual Sink Writes
+            Processor->>ES: Index document (IndexLog)
+            Processor->>Redis: Pipelined metric counters (RecordLog)
+        end
+        alt Sinks Succeeded
+            Processor->>Kafka: Commit message offset
+        else Any Sink Failed
+            Processor-->>Processor: Retry with backoff (Do NOT commit offset)
+        end
+    end
+```
+
+### 13.2 Automated Background Retention Cycle
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Timer as Retention Ticker (1h)
+    participant Service as Retention Service (:8084)
+    participant Manager as RetentionManager (internal/retention)
+    participant ES as Elasticsearch (:9200)
+    participant Prom as Prometheus Metrics
+
+    Timer->>Service: Ticker trigger
+    Service->>Manager: RunRetention(ctx, retentionDays=30)
+    Manager->>ES: ListIndices("logs-v1-*")
+    ES-->>Manager: List of IndexInfo (name, docs, size)
+    
+    loop For each index
+        alt Index is today's active write index (logs-v1-today)
+            Manager->>Manager: Skip (Preserve active index)
+        else Index date < (now - retentionDays)
+            Manager->>ES: DeleteIndex(indexName)
+            ES-->>Manager: 200 OK (Acknowledged)
+            Manager->>Prom: Inc(log_platform_retention_indices_deleted_total)
+        else Index is younger than retentionDays
+            Manager->>Manager: Skip (Preserve recent index)
+        end
+    end
+    
+    Manager->>Prom: Inc(log_platform_retention_runs_total{status="success"})
+    Manager-->>Service: RetentionResult (evaluated, deleted, duration)
+```
+
+### 13.3 Administrative Index Deletion & Safety Rejections
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Admin as Platform Admin
+    participant API as Analytics API (:8082)
+    participant Manager as RetentionManager
+    participant ES as Elasticsearch
+
+    Admin->>API: DELETE /admin/logs/indices/{index}
+    
+    alt Index name does not match logs-v1-YYYY.MM.DD
+        API-->>Admin: 400 Bad Request (INVALID_INDEX_NAME)
+    else Index is today's active write index
+        API-->>Admin: 422 Unprocessable Entity (PROTECTED_INDEX)
+    else Index is valid historical log index
+        API->>Manager: DeleteIndexByName(ctx, index)
+        Manager->>ES: DeleteIndex(index)
+        alt Index not found in ES
+            ES-->>Manager: 404 Not Found
+            Manager-->>API: 404 Not Found
+            API-->>Admin: 404 Not Found
+        else Index deleted successfully
+            ES-->>Manager: 200 OK
+            Manager-->>API: nil
+            API-->>Admin: 200 OK ({"deleted_index": index, "status": "deleted"})
+        end
+    end
+```
 
 ---
 
 *These diagrams are the contract for how data moves through the system. When debugging, identify which arrow is broken.*
+
