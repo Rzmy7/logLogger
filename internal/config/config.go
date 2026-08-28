@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -11,6 +12,11 @@ import (
 // Config holds application configuration loaded from environment variables.
 type Config struct {
 	PostgresURL          string
+	PostgresHost         string
+	PostgresPort         string
+	PostgresDB           string
+	PostgresUser         string
+	PostgresPassword     string
 	RedisURL             string
 	KafkaBrokers         []string
 	ElasticsearchURL     string
@@ -28,11 +34,34 @@ func Load() (*Config, error) {
 
 	cfg := &Config{
 		PostgresURL:          getEnv("POSTGRES_URL"),
+		PostgresHost:         getEnv("POSTGRES_HOST"),
+		PostgresPort:         getEnv("POSTGRES_PORT"),
+		PostgresDB:           getEnv("POSTGRES_DB"),
+		PostgresUser:         getEnv("POSTGRES_USER"),
+		PostgresPassword:     getEnv("POSTGRES_PASSWORD"),
 		RedisURL:             getEnvWithFallback("REDIS_URL", "REDIS_ADDR"),
 		ElasticsearchURL:     getEnvWithFallback("ELASTICSEARCH_URL", "ES_URL"),
 		HTTPPort:             getEnv("HTTP_PORT"),
 		LogLevel:             strings.ToLower(getEnv("LOG_LEVEL")),
 		RetentionMetricsPort: getEnv("RETENTION_METRICS_PORT"),
+	}
+
+	// Construct PostgresURL from discrete components if POSTGRES_URL is empty
+	if cfg.PostgresURL == "" && cfg.PostgresHost != "" {
+		port := cfg.PostgresPort
+		if port == "" {
+			port = "5432"
+		}
+		db := cfg.PostgresDB
+		if db == "" {
+			db = "log_analytics"
+		}
+		user := cfg.PostgresUser
+		if user == "" {
+			user = "postgres"
+		}
+		userInfo := url.UserPassword(user, cfg.PostgresPassword)
+		cfg.PostgresURL = fmt.Sprintf("postgresql://%s@%s:%s/%s?sslmode=disable", userInfo.String(), cfg.PostgresHost, port, db)
 	}
 
 	// Parse Kafka brokers
@@ -98,9 +127,6 @@ func Load() (*Config, error) {
 func (c *Config) validate() error {
 	var missing []string
 
-	if c.PostgresURL == "" {
-		missing = append(missing, "POSTGRES_URL")
-	}
 	if c.RedisURL == "" {
 		missing = append(missing, "REDIS_URL")
 	}
@@ -137,8 +163,15 @@ func getEnvWithFallback(primary, fallback string) string {
 }
 
 func loadEnvFile(path string) {
-	data, err := os.ReadFile(path)
-	if err != nil {
+	paths := []string{path, "../" + path, "../../" + path}
+	var data []byte
+	var err error
+	for _, p := range paths {
+		if data, err = os.ReadFile(p); err == nil {
+			break
+		}
+	}
+	if len(data) == 0 {
 		return
 	}
 	lines := strings.Split(string(data), "\n")

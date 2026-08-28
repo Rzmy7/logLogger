@@ -543,7 +543,39 @@ sequenceDiagram
     end
 ```
 
+### 13.4 Multi-Tenant Resolution & Log Streaming Flow
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Client as Log Client
+    participant Ingestor as Ingestor API (:8081)
+    participant Cache as Metadata Cache / PG
+    participant Kafka as Kafka (app-logs)
+    participant Processor as Stream Processor
+    participant ES as Elasticsearch (logs-v1-*)
+    participant Redis as Redis Store
+
+    Client->>Ingestor: POST /api/v1/logs [Header: Authorization Bearer raw_key]
+    Ingestor->>Ingestor: SHA256(raw_key) -> key_hash
+    Ingestor->>Cache: Lookup tenant by key_hash (Cached)
+    alt Invalid / Revoked Key
+        Ingestor-->>Client: 401 Unauthorized
+    else Valid Tenant
+        Ingestor->>Kafka: Publish event (tenant_id, trace_id, level, service, message)
+        Ingestor-->>Client: 202 Accepted
+    end
+
+    Kafka->>Processor: Consume event
+    par Isolated Sinks
+        Processor->>ES: Index document with keyword tenant_id
+        Processor->>Redis: Record metrics to tenant:{tenant_id}:*
+    end
+    Processor->>Kafka: Commit offset
+```
+
 ---
 
 *These diagrams are the contract for how data moves through the system. When debugging, identify which arrow is broken.*
+
 

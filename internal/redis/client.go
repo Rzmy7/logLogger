@@ -41,7 +41,7 @@ type MetricsRecorder interface {
 
 // MetricsReader defines the contract for querying real-time metrics from Redis.
 type MetricsReader interface {
-	GetLiveMetrics(ctx context.Context, services []string) (int64, map[string]ServiceMetrics, error)
+	GetLiveMetrics(ctx context.Context, requestedServices []string) (int64, map[string]ServiceMetrics, error)
 	GetTopErrors(ctx context.Context, n int) ([]TopErrorItem, error)
 	GetTopServices(ctx context.Context, n int) ([]TopServiceItem, error)
 	Ping(ctx context.Context) error
@@ -83,7 +83,7 @@ func (c *Client) Close() error {
 	return nil
 }
 
-// RecordLog records all documented Redis metrics in an atomic pipeline.
+// RecordLog records all documented Redis metrics in an atomic pipeline using KeyBuilder.
 func (c *Client) RecordLog(ctx context.Context, logMsg *models.LogMessage, rawJSON []byte) error {
 	if logMsg == nil {
 		return errors.New("log message cannot be nil")
@@ -94,25 +94,24 @@ func (c *Client) RecordLog(ctx context.Context, logMsg *models.LogMessage, rawJS
 		metrics.RedisOperationDuration.WithLabelValues("record_log").Observe(time.Since(start).Seconds())
 	}()
 
+	kb := NewKeyBuilder(logMsg.Tenant())
 	pipe := c.rdb.Pipeline()
 
 	// 1. Total logs counter (String)
-	pipe.Incr(ctx, "stats:logs:total")
+	pipe.Incr(ctx, kb.StatsLogsTotal())
 
 	// 2. Total logs per service (String)
-	pipe.Incr(ctx, fmt.Sprintf("stats:logs:%s", logMsg.Service))
+	pipe.Incr(ctx, kb.StatsLogsService(logMsg.Service))
 
 	// 3. Total logs per level (String)
-	levelLower := strings.ToLower(logMsg.Level)
-	pipe.Incr(ctx, fmt.Sprintf("stats:logs:level:%s", levelLower))
+	pipe.Incr(ctx, kb.StatsLogsLevel(logMsg.Level))
 
 	// 4. Service leaderboard by volume (Sorted Set)
-	pipe.ZIncrBy(ctx, "leaderboard:services", 1, logMsg.Service)
+	pipe.ZIncrBy(ctx, kb.LeaderboardServices(), 1, logMsg.Service)
 
 	// 5. Unique IPs seen per day with 24h TTL (Set)
 	if logMsg.IP != "" {
-		today := time.Now().UTC().Format("2006-01-02")
-		ipKey := fmt.Sprintf("unique:ips:%s", today)
+		ipKey := kb.UniqueIPs(time.Now().UTC())
 		pipe.SAdd(ctx, ipKey, logMsg.IP)
 		pipe.Expire(ctx, ipKey, 24*time.Hour)
 	}
@@ -120,19 +119,19 @@ func (c *Client) RecordLog(ctx context.Context, logMsg *models.LogMessage, rawJS
 	// 6. Error metrics on ERROR or FATAL levels
 	if logMsg.Level == "ERROR" || logMsg.Level == "FATAL" {
 		// All-time error counter per service
-		pipe.Incr(ctx, fmt.Sprintf("stats:errors:%s", logMsg.Service))
+		pipe.Incr(ctx, kb.StatsErrorsService(logMsg.Service))
 
 		// 5-minute sliding window error counter
-		windowKey := fmt.Sprintf("stats:errors:last_5m:%s", logMsg.Service)
+		windowKey := kb.StatsErrorsLast5m(logMsg.Service)
 		pipe.Incr(ctx, windowKey)
 		pipe.Expire(ctx, windowKey, 5*time.Minute)
 
 		// Top error messages leaderboard (Sorted Set)
-		pipe.ZIncrBy(ctx, "leaderboard:errors", 1, logMsg.Message)
+		pipe.ZIncrBy(ctx, kb.LeaderboardErrors(), 1, logMsg.Message)
 
 		// Recent errors list (List, capped at 100)
 		if len(rawJSON) > 0 {
-			recentKey := fmt.Sprintf("recent:errors:%s", logMsg.Service)
+			recentKey := kb.RecentErrors(logMsg.Service)
 			pipe.LPush(ctx, recentKey, rawJSON)
 			pipe.LTrim(ctx, recentKey, 0, 99)
 		}
@@ -149,8 +148,10 @@ func (c *Client) RecordLog(ctx context.Context, logMsg *models.LogMessage, rawJS
 
 // GetLiveMetrics queries the real-time metrics for total logs and requested/all services.
 func (c *Client) GetLiveMetrics(ctx context.Context, requestedServices []string) (int64, map[string]ServiceMetrics, error) {
+	kb := NewKeyBuilder("")
+
 	// Total logs
-	totalLogsVal, err := c.rdb.Get(ctx, "stats:logs:total").Result()
+	totalLogsVal, err := c.rdb.Get(ctx, kb.StatsLogsTotal()).Result()
 	var totalLogs int64
 	if err == nil {
 		totalLogs, _ = strconv.ParseInt(totalLogsVal, 10, 64)
@@ -161,7 +162,7 @@ func (c *Client) GetLiveMetrics(ctx context.Context, requestedServices []string)
 	servicesToFetch := requestedServices
 	if len(servicesToFetch) == 0 || (len(servicesToFetch) == 1 && (servicesToFetch[0] == "" || servicesToFetch[0] == "all")) {
 		// Fetch all known services from the leaderboard
-		servicesList, err := c.rdb.ZRevRange(ctx, "leaderboard:services", 0, -1).Result()
+		servicesList, err := c.rdb.ZRevRange(ctx, kb.LeaderboardServices(), 0, -1).Result()
 		if err != nil && !errors.Is(err, redisGo.Nil) {
 			return 0, nil, fmt.Errorf("failed to list services: %w", err)
 		}
@@ -188,9 +189,9 @@ func (c *Client) GetLiveMetrics(ctx context.Context, requestedServices []string)
 			continue
 		}
 		cmdsMap[svc] = serviceCmds{
-			totalLogsCmd:    pipe.Get(ctx, fmt.Sprintf("stats:logs:%s", svc)),
-			totalErrorsCmd:  pipe.Get(ctx, fmt.Sprintf("stats:errors:%s", svc)),
-			errorsLast5mCmd: pipe.Get(ctx, fmt.Sprintf("stats:errors:last_5m:%s", svc)),
+			totalLogsCmd:    pipe.Get(ctx, kb.StatsLogsService(svc)),
+			totalErrorsCmd:  pipe.Get(ctx, kb.StatsErrorsService(svc)),
+			errorsLast5mCmd: pipe.Get(ctx, kb.StatsErrorsLast5m(svc)),
 		}
 	}
 
@@ -224,7 +225,8 @@ func (c *Client) GetTopErrors(ctx context.Context, n int) ([]TopErrorItem, error
 		n = 100
 	}
 
-	results, err := c.rdb.ZRevRangeWithScores(ctx, "leaderboard:errors", 0, int64(n-1)).Result()
+	kb := NewKeyBuilder("")
+	results, err := c.rdb.ZRevRangeWithScores(ctx, kb.LeaderboardErrors(), 0, int64(n-1)).Result()
 	if err != nil {
 		if errors.Is(err, redisGo.Nil) {
 			return []TopErrorItem{}, nil
@@ -256,7 +258,8 @@ func (c *Client) GetTopServices(ctx context.Context, n int) ([]TopServiceItem, e
 		n = 100
 	}
 
-	results, err := c.rdb.ZRevRangeWithScores(ctx, "leaderboard:services", 0, int64(n-1)).Result()
+	kb := NewKeyBuilder("")
+	results, err := c.rdb.ZRevRangeWithScores(ctx, kb.LeaderboardServices(), 0, int64(n-1)).Result()
 	if err != nil {
 		if errors.Is(err, redisGo.Nil) {
 			return []TopServiceItem{}, nil

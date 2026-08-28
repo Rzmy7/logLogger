@@ -460,6 +460,30 @@ High-volume log ingestion continuously expands Elasticsearch storage. Without au
 
 ---
 
+## ADR-015: Multi-Tenant Architecture & PostgreSQL Metadata Store
+
+### Context
+To support multiple independent organizations/tenants on a shared platform, the system requires clear domain boundaries, secure tenant isolation, and administrative metadata management without introducing synchronous database overhead to the high-throughput log ingestion and stream processing paths.
+
+### Decision
+1. **Control-Plane vs. Data-Plane Separation:**
+   - **PostgreSQL (Control Plane):** Serves exclusively as the relational metadata database for tenants, hashed API keys, service registrations, retention configurations, and future alert rules/RBAC. **PostgreSQL is never placed in the hot log ingestion path.**
+   - **Kafka (Data Plane Transport):** The event payload carries `tenant_id` alongside log payload fields, allowing downstream consumers to process events without querying PostgreSQL per message.
+   - **Elasticsearch (Data Plane Storage & Search):** Uses shared daily indices (`logs-v1-YYYY.MM.DD`) with a `tenant_id` keyword property. Search queries enforce strict tenant scoping via Elasticsearch boolean term filters (`{"term": {"tenant_id": "<tenant_id>"}}`).
+   - **Redis (Real-Time Metrics):** Real-time counters, sliding error windows, and leaderboards use centralized tenant namespacing (`tenant:{tenant_id}:stats:...`, `tenant:{tenant_id}:leaderboard:...`) with backward-compatible defaults.
+2. **SOLID Repository Layer:**
+   - Repository interfaces (`TenantRepository`, `APIKeyRepository`, `ServiceRepository`, `RetentionPolicyRepository`) decouple business operations from PostgreSQL database logic.
+   - In-memory mock repositories enable fast, independent unit tests without requiring a live PostgreSQL instance.
+3. **API Key Security:**
+   - API keys are cryptographically generated (32 bytes entropy) and stored exclusively as SHA-256 hex hashes (`key_hash`). Plaintext keys are never persisted or logged.
+   - Future API-key resolution will be cached at the ingress boundary (e.g. in-memory or Redis cache) to prevent PostgreSQL query bottlenecks.
+
+### Consequences
+- **Positive:** Multi-tenant metadata management is established with zero performance penalty on the existing 1,600+ logs/sec ingestion pipeline.
+- **Negative:** Search queries and metric aggregations must strictly include tenant scope to prevent cross-tenant data leakage.
+
+---
+
 ## Summary Table
 
 | # | Decision | Status | Reversibility |
@@ -478,8 +502,10 @@ High-volume log ingestion continuously expands Elasticsearch storage. Without au
 | 012 | log/slog for logging | Accepted | Easy (swap handler) |
 | 013 | Environment-based config | Accepted | Easy (add file config later) |
 | 014 | Index lifecycle & dedicated retention service | Accepted | Medium (swap lifecycle manager) |
+| 015 | Multi-tenant architecture & PostgreSQL metadata | Accepted | Medium (schema evolution) |
 
 ---
 
 *This document captures the reasoning behind every major technical choice. In interviews, expect questions like "Why Kafka over RabbitMQ?" or "Why not just use PostgreSQL for everything?" The answers are here.*
+
 

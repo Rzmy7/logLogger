@@ -75,6 +75,9 @@ func (m *MockIndexer) SearchLogs(ctx context.Context, params SearchParams) (*Sea
 
 	var matched []*models.LogDocument
 	for _, doc := range m.Documents {
+		if params.TenantID != "" && doc.TenantID != params.TenantID {
+			continue
+		}
 		if params.Service != "" && doc.Service != params.Service {
 			continue
 		}

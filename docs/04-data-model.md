@@ -20,109 +20,133 @@ This system uses **polyglot persistence** — each database handles the access p
 
 ---
 
-## 2. PostgreSQL Schema
+## 2. PostgreSQL Schema (Multi-Tenant Metadata Store)
 
 ### 2.1 Entity Relationship Diagram
 
-```
-┌─────────────────┐       ┌─────────────────┐       ┌─────────────────┐
-│  applications   │       │   services      │       │  environments   │
-├─────────────────┤       ├─────────────────┤       ├─────────────────┤
-│ id (PK)         │◄──────┤ id (PK)         │──────►│ id (PK)         │
-│ name (UQ)       │       │ application_id  │       │ name (UQ)       │
-│ description     │       │ environment_id  │       │ created_at      │
-│ created_at      │       │ name            │       └─────────────────┘
-└─────────────────┘       │ created_at      │
-                          └─────────────────┘
-                                   │
-                                   │
-                          ┌────────┴────────┐
-                          ▼                 ▼
-                   ┌──────────────┐  ┌──────────────┐
-                   │ alert_rules  │  │saved_searches│
-                   ├──────────────┤  ├──────────────┤
-                   │ id (PK)      │  │ id (PK)      │
-                   │ service_id   │  │ name         │
-                   │ condition    │  │ query (JSONB)│
-                   │ threshold    │  │ created_at   │
-                   │ window_mins  │  └──────────────┘
-                   │ created_at   │
-                   └──────────────┘
+```mermaid
+erDiagram
+    tenants ||--o{ api_keys : "owns"
+    tenants ||--o{ services : "registers"
+    tenants ||--o| retention_policies : "configures"
+
+    tenants {
+        uuid id PK
+        varchar name
+        varchar slug UK
+        varchar status
+        timestamptz created_at
+        timestamptz updated_at
+    }
+
+    api_keys {
+        uuid id PK
+        uuid tenant_id FK
+        varchar key_hash UK
+        varchar name
+        varchar status
+        timestamptz created_at
+        timestamptz last_used_at
+        timestamptz expires_at
+    }
+
+    services {
+        uuid id PK
+        uuid tenant_id FK
+        varchar name
+        timestamptz created_at
+        timestamptz updated_at
+    }
+
+    retention_policies {
+        uuid id PK
+        uuid tenant_id FK "UK"
+        int retention_days
+        boolean enabled
+        timestamptz created_at
+        timestamptz updated_at
+    }
 ```
 
 ### 2.2 Table Definitions
 
-#### `applications`
-Logical grouping of services (e.g., "ecommerce-platform", "payment-gateway").
+#### `tenants`
+Independent owner of applications, API keys, and logs.
 
 ```sql
-CREATE TABLE applications (
+CREATE TABLE tenants (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name        VARCHAR(100) NOT NULL,
-    description TEXT,
+    slug        VARCHAR(100) NOT NULL,
+    status      VARCHAR(20) NOT NULL DEFAULT 'active',
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
-    CONSTRAINT uq_applications_name UNIQUE (name)
+    CONSTRAINT uq_tenants_slug UNIQUE (slug)
 );
 
-CREATE INDEX idx_applications_name ON applications(name);
+CREATE INDEX idx_tenants_slug ON tenants(slug);
+CREATE INDEX idx_tenants_status ON tenants(status);
 ```
 
-#### `environments`
-Deployment environments (production, staging, development).
+#### `api_keys`
+Cryptographically generated authentication keys. **Raw keys are never stored in the database**; only the SHA-256 hex digest (`key_hash`) is persisted.
 
 ```sql
-CREATE TABLE environments (
-    id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    name       VARCHAR(50) NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+CREATE TABLE api_keys (
+    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id     UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    key_hash      VARCHAR(64) NOT NULL,
+    name          VARCHAR(100) NOT NULL,
+    status        VARCHAR(20) NOT NULL DEFAULT 'active',
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_used_at  TIMESTAMPTZ,
+    expires_at    TIMESTAMPTZ,
 
-    CONSTRAINT uq_environments_name UNIQUE (name)
+    CONSTRAINT uq_api_keys_key_hash UNIQUE (key_hash)
 );
 
--- Seed data
-INSERT INTO environments (name) VALUES ('production'), ('staging'), ('development');
+CREATE INDEX idx_api_keys_tenant_id ON api_keys(tenant_id);
+CREATE INDEX idx_api_keys_key_hash ON api_keys(key_hash);
 ```
 
 #### `services`
-Actual log sources. Every incoming log must reference a valid service.
+Log-emitting application components scoped to a tenant.
 
 ```sql
 CREATE TABLE services (
-    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    application_id  UUID NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
-    environment_id  UUID NOT NULL REFERENCES environments(id) ON DELETE CASCADE,
-    name            VARCHAR(100) NOT NULL,
-    description     TEXT,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id   UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    name        VARCHAR(100) NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
-    CONSTRAINT uq_services_app_env_name UNIQUE (application_id, environment_id, name)
+    CONSTRAINT uq_services_tenant_name UNIQUE (tenant_id, name)
 );
 
-CREATE INDEX idx_services_app_id ON services(application_id);
-CREATE INDEX idx_services_env_id ON services(environment_id);
+CREATE INDEX idx_services_tenant_id ON services(tenant_id);
 CREATE INDEX idx_services_name ON services(name);
 ```
 
-#### `alert_rules`
-Threshold definitions for future alert engine. Stored now to demonstrate PG as operational config store.
+#### `retention_policies`
+Per-tenant data lifecycle configuration.
 
 ```sql
-CREATE TABLE alert_rules (
-    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    service_id    UUID NOT NULL REFERENCES services(id) ON DELETE CASCADE,
-    name          VARCHAR(200) NOT NULL,
-    condition     VARCHAR(50) NOT NULL,  -- 'error_rate', 'latency_p99', 'throughput'
-    threshold     INT NOT NULL,
-    window_minutes INT NOT NULL DEFAULT 5,
-    enabled       BOOLEAN NOT NULL DEFAULT true,
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+CREATE TABLE retention_policies (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id       UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    retention_days  INT NOT NULL DEFAULT 30 CHECK (retention_days > 0),
+    enabled         BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    CONSTRAINT uq_retention_policies_tenant UNIQUE (tenant_id)
 );
 
-CREATE INDEX idx_alert_rules_service ON alert_rules(service_id);
-CREATE INDEX idx_alert_rules_enabled ON alert_rules(enabled);
+CREATE INDEX idx_retention_policies_tenant ON retention_policies(tenant_id);
 ```
+
+---
 
 #### `saved_searches`
 User-saved Elasticsearch query DSL for quick re-runs.

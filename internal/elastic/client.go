@@ -35,6 +35,9 @@ const IndexTemplateDefinition = `{
     "mappings": {
       "dynamic": "strict",
       "properties": {
+        "tenant_id": {
+          "type": "keyword"
+        },
         "timestamp": {
           "type": "date",
           "format": "strict_date_optional_time||epoch_millis"
@@ -66,14 +69,15 @@ const IndexTemplateDefinition = `{
 
 // SearchParams encapsulates query parameters for searching logs.
 type SearchParams struct {
-	Query   string
-	Service string
-	Level   string
-	TraceID string
-	From    string
-	To      string
-	Page    int
-	Size    int
+	TenantID string
+	Query    string
+	Service  string
+	Level    string
+	TraceID  string
+	From     string
+	To       string
+	Page     int
+	Size     int
 }
 
 // SearchResult holds paginated log results.
@@ -247,6 +251,14 @@ func (c *Client) SearchLogs(ctx context.Context, params SearchParams) (*SearchRe
 	} else {
 		mustClauses = append(mustClauses, map[string]any{
 			"match_all": map[string]any{},
+		})
+	}
+
+	if params.TenantID != "" {
+		filterClauses = append(filterClauses, map[string]any{
+			"term": map[string]any{
+				"tenant_id": params.TenantID,
+			},
 		})
 	}
 

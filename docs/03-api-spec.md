@@ -62,16 +62,18 @@ All HTTP APIs return JSON and use standard HTTP status codes. All timestamps are
 | `Content-Type` | Yes (POST/PUT) | `application/json` |
 | `X-Request-ID` | No | Client-generated trace ID (falls back to server-generated) |
 
-### 2.4 HTTP Status Codes
+### 2.5 Multi-Tenant Authentication & Future Authorization Model
 
-| Code | Meaning | When Used |
-|------|---------|-----------|
-| `200` | OK | Successful GET request |
-| `202` | Accepted | Log queued successfully (asynchronous) |
-| `400` | Bad Request | Validation failure, malformed JSON |
-| `404` | Not Found | Resource does not exist |
-| `429` | Too Many Requests | Rate limit exceeded (Redis TTL check) |
-| `503` | Service Unavailable | Kafka or PostgreSQL unreachable |
+> [!NOTE]
+> In the current foundational phase, requests without explicit authorization headers default to `tenant_id: "default"` for 100% backward compatibility with local testing, benchmarking, and existing tests. The multi-tenant metadata layer in PostgreSQL establishes the schema and repository contracts for future authentication enforcement.
+
+**Future Authorization Flow:**
+1. **API Key Header:** Clients provide `Authorization: Bearer <raw_api_key>` (e.g. `Authorization: Bearer ll_live_9a8f...`) or `X-API-Key: <raw_api_key>`.
+2. **Ingress Resolution:** The Ingestor/Analytics API hashes the provided key via SHA-256 and resolves the active `tenant_id` from the cached metadata layer (never executing a per-message synchronous database query on the hot log path).
+3. **Tenant Scoping:**
+   - Ingested log events are automatically stamped with the resolved `tenant_id` and published to Kafka.
+   - Search requests (`GET /search`) automatically enforce boolean filter `{"term": {"tenant_id": "<tenant_id>"}}` in Elasticsearch.
+   - Real-time metrics queries are routed to the tenant's isolated Redis keys (`tenant:<tenant_id>:*`).
 
 ---
 

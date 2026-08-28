@@ -1,15 +1,29 @@
 package models
 
-import "time"
+import (
+	"strings"
+	"time"
+)
+
+const DefaultTenantID = "default"
 
 // LogMessage represents a structured log event flowing through the pipeline.
 type LogMessage struct {
+	TenantID  string `json:"tenant_id,omitempty"`
 	Timestamp string `json:"timestamp"`
 	Level     string `json:"level"`
 	Service   string `json:"service"`
 	Message   string `json:"message"`
 	TraceID   string `json:"trace_id,omitempty"`
 	IP        string `json:"ip,omitempty"`
+}
+
+// Tenant returns the TenantID or DefaultTenantID if empty.
+func (l *LogMessage) Tenant() string {
+	if trimmed := strings.TrimSpace(l.TenantID); trimmed != "" {
+		return trimmed
+	}
+	return DefaultTenantID
 }
 
 // ParsedTime parses the RFC3339 timestamp of the LogMessage.
@@ -21,8 +35,9 @@ func (l *LogMessage) ParsedTime() (time.Time, error) {
 	return t, nil
 }
 
-// LogDocument represents the document indexed into Elasticsearch (with ingested_at).
+// LogDocument represents the document indexed into Elasticsearch (with ingested_at and tenant_id).
 type LogDocument struct {
+	TenantID   string `json:"tenant_id"`
 	Timestamp  string `json:"timestamp"`
 	Level      string `json:"level"`
 	Service    string `json:"service"`
@@ -35,6 +50,7 @@ type LogDocument struct {
 // ToDocument converts a LogMessage to an Elasticsearch LogDocument.
 func (l *LogMessage) ToDocument(ingestedAt time.Time) *LogDocument {
 	return &LogDocument{
+		TenantID:   l.Tenant(),
 		Timestamp:  l.Timestamp,
 		Level:      l.Level,
 		Service:    l.Service,
