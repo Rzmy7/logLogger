@@ -484,6 +484,35 @@ To support multiple independent organizations/tenants on a shared platform, the 
 
 ---
 
+## ADR-016: Micro-Batched Elasticsearch Bulk Indexing & Offset Safety
+
+### Context
+In single-document processing mode, the Stream Processor issued an individual HTTP request for every log document (`POST /logs-v1-*/_doc`). This introduced severe HTTP round-trip overhead that capped Processor throughput at ~100 logs/sec, creating a large throughput mismatch against the Ingestor's 1,600+ logs/sec capability and accumulating substantial Kafka consumer lag under stress.
+
+### Decision
+1. **Micro-Batched `_bulk` Indexing:**
+   - Accumulate incoming Kafka messages into an in-memory batch flushed when reaching `ELASTIC_BULK_SIZE` (default: 200 documents) or when `ELASTIC_BULK_FLUSH_INTERVAL` (default: 100ms) timer fires.
+   - Assemble NDJSON payloads targeting daily indices (`logs-v1-YYYY.MM.DD`) with deterministic document IDs (`SHA256(tenant_id|service|level|timestamp|trace_id|message)[:32]`).
+2. **Item-Level Failure & DLQ Routing:**
+   - Inspect individual bulk response items (`errors: true/false` and item `status`).
+   - Treat transient cluster failures (502/503/504, 429 circuit breaking, network timeouts) as retryable with exponential backoff.
+   - Route permanent document-level failures (400 mapping parse errors) to `app-logs-dlq` with detailed diagnostic metadata (`models.DLQMessage`).
+3. **Atomic Redis Batch Pipelining:**
+   - Successfully indexed documents within a batch are recorded to Redis via a single atomic pipeline round-trip (`redisClient.RecordBatch`), avoiding individual Redis network roundtrips.
+4. **Strict Offset Commit Safety Invariant:**
+   - Kafka message offsets are **never** committed before their corresponding documents are verified indexed in Elasticsearch and recorded in Redis.
+   - If an unrecoverable or transient error occurs, the batch is retried with backoff and offsets are held until dual-sink success is verified.
+5. **Deterministic Idempotency:**
+   - The deterministic 32-character hex document ID ensures that if a Kafka batch is retried after a partial failure or consumer crash, duplicate Elasticsearch documents are not created; Elasticsearch performs an idempotent document update.
+6. **Graceful Shutdown:**
+   - When `SIGTERM` or context cancellation is received, the consumer stops fetching, flushes any pending in-memory batch with a dedicated 10-second shutdown context, completes Elasticsearch and Redis writes, commits offsets, and cleanly closes connections.
+
+### Consequences
+- **Positive:** Processor indexing throughput increases by over 15x to match the Ingestor's high throughput, eliminating consumer lag without sacrificing at-least-once delivery guarantees.
+- **Negative:** Up to 100ms added latency before a newly consumed log document appears in search queries (balanced by real-time sub-millisecond Redis visibility).
+
+---
+
 ## Summary Table
 
 | # | Decision | Status | Reversibility |
@@ -493,7 +522,7 @@ To support multiple independent organizations/tenants on a shared platform, the 
 | 003 | Polyglot persistence (4 stores) | Accepted | Hard (architectural) |
 | 004 | Redis data structures (not just cache) | Accepted | Easy (key patterns evolve) |
 | 005 | ES versioned indices + strict mapping | Accepted | Medium (reindexing needed) |
-| 006 | Bulk indexing (100 docs / 5s) | Accepted | Easy (tune parameters) |
+| 006 | Bulk indexing (100 docs / 5s) | Superseded by ADR-016 | Easy (tune parameters) |
 | 007 | DLQ as Kafka topic | Accepted | Medium (topic config) |
 | 008 | 3 microservices + 2 CLI tools | Accepted | Hard (merge/split services) |
 | 009 | No frontend, CLI-first | Accepted | Easy (add UI later) |
@@ -503,6 +532,7 @@ To support multiple independent organizations/tenants on a shared platform, the 
 | 013 | Environment-based config | Accepted | Easy (add file config later) |
 | 014 | Index lifecycle & dedicated retention service | Accepted | Medium (swap lifecycle manager) |
 | 015 | Multi-tenant architecture & PostgreSQL metadata | Accepted | Medium (schema evolution) |
+| 016 | Micro-batched ES bulk indexing & offset safety | Accepted | Medium (tune batch parameters) |
 
 ---
 

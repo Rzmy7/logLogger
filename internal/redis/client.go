@@ -35,6 +35,7 @@ type TopServiceItem struct {
 // MetricsRecorder defines the contract for recording real-time metrics in Redis.
 type MetricsRecorder interface {
 	RecordLog(ctx context.Context, logMsg *models.LogMessage, rawJSON []byte) error
+	RecordBatch(ctx context.Context, logs []*models.LogMessage, rawJSONs [][]byte) error
 	Ping(ctx context.Context) error
 	Close() error
 }
@@ -143,6 +144,82 @@ func (c *Client) RecordLog(ctx context.Context, logMsg *models.LogMessage, rawJS
 	}
 
 	metrics.RedisOperationsTotal.WithLabelValues("record_log", "success").Inc()
+	return nil
+}
+
+// RecordBatch records real-time metrics for a micro-batch of logs in a single atomic Redis pipeline.
+func (c *Client) RecordBatch(ctx context.Context, logs []*models.LogMessage, rawJSONs [][]byte) error {
+	if len(logs) == 0 {
+		return nil
+	}
+
+	start := time.Now()
+	defer func() {
+		metrics.RedisOperationDuration.WithLabelValues("record_batch").Observe(time.Since(start).Seconds())
+	}()
+
+	pipe := c.rdb.Pipeline()
+	nowUTC := time.Now().UTC()
+
+	for i, logMsg := range logs {
+		if logMsg == nil {
+			continue
+		}
+
+		var rawJSON []byte
+		if i < len(rawJSONs) {
+			rawJSON = rawJSONs[i]
+		}
+
+		kb := NewKeyBuilder(logMsg.Tenant())
+
+		// 1. Total logs counter (String)
+		pipe.Incr(ctx, kb.StatsLogsTotal())
+
+		// 2. Total logs per service (String)
+		pipe.Incr(ctx, kb.StatsLogsService(logMsg.Service))
+
+		// 3. Total logs per level (String)
+		pipe.Incr(ctx, kb.StatsLogsLevel(logMsg.Level))
+
+		// 4. Service leaderboard by volume (Sorted Set)
+		pipe.ZIncrBy(ctx, kb.LeaderboardServices(), 1, logMsg.Service)
+
+		// 5. Unique IPs seen per day with 24h TTL (Set)
+		if logMsg.IP != "" {
+			ipKey := kb.UniqueIPs(nowUTC)
+			pipe.SAdd(ctx, ipKey, logMsg.IP)
+			pipe.Expire(ctx, ipKey, 24*time.Hour)
+		}
+
+		// 6. Error metrics on ERROR or FATAL levels
+		if logMsg.Level == "ERROR" || logMsg.Level == "FATAL" {
+			// All-time error counter per service
+			pipe.Incr(ctx, kb.StatsErrorsService(logMsg.Service))
+
+			// 5-minute sliding window error counter
+			windowKey := kb.StatsErrorsLast5m(logMsg.Service)
+			pipe.Incr(ctx, windowKey)
+			pipe.Expire(ctx, windowKey, 5*time.Minute)
+
+			// Top error messages leaderboard (Sorted Set)
+			pipe.ZIncrBy(ctx, kb.LeaderboardErrors(), 1, logMsg.Message)
+
+			// Recent errors list (List, capped at 100)
+			if len(rawJSON) > 0 {
+				recentKey := kb.RecentErrors(logMsg.Service)
+				pipe.LPush(ctx, recentKey, rawJSON)
+				pipe.LTrim(ctx, recentKey, 0, 99)
+			}
+		}
+	}
+
+	if _, err := pipe.Exec(ctx); err != nil {
+		metrics.RedisOperationsTotal.WithLabelValues("record_batch", "error").Inc()
+		return fmt.Errorf("failed to record Redis batch metrics: %w", err)
+	}
+
+	metrics.RedisOperationsTotal.WithLabelValues("record_batch", "success").Inc()
 	return nil
 }
 

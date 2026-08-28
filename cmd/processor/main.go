@@ -22,8 +22,7 @@ import (
 	kafkaGo "github.com/segmentio/kafka-go"
 )
 
-// ProcessMessage processes a single Kafka message: routes poison/malformed messages to DLQ,
-// or indexes valid messages into Elasticsearch and records metrics in Redis.
+// ProcessMessage processes a single Kafka message (retained for backward compatibility and single-message fallback).
 func ProcessMessage(
 	ctx context.Context,
 	msg kafkaGo.Message,
@@ -56,7 +55,6 @@ func ProcessMessage(
 
 		metrics.KafkaDLQMessagesTotal.WithLabelValues(kafka.TopicAppLogsDLQ).Inc()
 		log.Printf("[DLQ] Successfully routed invalid message (offset=%d) to %s", msg.Offset, kafka.TopicAppLogsDLQ)
-		// Return nil so consumer commits the original offset and avoids poison pill blockage
 		return nil
 	}
 
@@ -75,31 +73,6 @@ func ProcessMessage(
 		log.Printf("[ERROR] Failed to record Redis metrics (key=%s, offset=%d): %v", string(msg.Key), msg.Offset, err)
 		return fmt.Errorf("redis metrics recording failed: %w", err)
 	}
-
-	traceID := logMsg.TraceID
-	if traceID == "" {
-		traceID = "-"
-	}
-	ip := logMsg.IP
-	if ip == "" {
-		ip = "-"
-	}
-
-	t, err := logMsg.ParsedTime()
-	if err != nil {
-		t = ingestedAt
-	}
-	indexName := elastic.IndexNameForTime(t)
-
-	log.Printf("[PROCESSED, INDEXED & METRICS] index=%s service=%s level=%s trace_id=%s ip=%s time=%s message=%q",
-		indexName,
-		logMsg.Service,
-		logMsg.Level,
-		traceID,
-		ip,
-		logMsg.Timestamp,
-		logMsg.Message,
-	)
 
 	return nil
 }
@@ -209,14 +182,18 @@ func main() {
 		}
 	}()
 
-	// 8. Define Message Handler
-	handler := func(ctx context.Context, msg kafkaGo.Message) error {
-		return ProcessMessage(ctx, msg, esClient, redisClient, dlqProducer, processorID)
+	// 8. Initialize Micro-Batch Processor
+	batchCfg := BatchConfig{
+		BulkSize:      cfg.ElasticBulkSize,
+		FlushInterval: cfg.ElasticBulkFlushInterval,
+		ProcessorID:   processorID,
 	}
+	batchProcessor := NewBatchProcessor(batchCfg, consumer, esClient, redisClient, dlqProducer)
 
 	// 9. Start Consumption Loop
-	log.Println("[INFO] Stream Processor running and waiting for events...")
-	if err := consumer.Start(ctx, handler); err != nil {
+	log.Printf("[INFO] Stream Processor running (mode=bulk, bulk_size=%d, flush_interval=%v, workers=%d)...",
+		cfg.ElasticBulkSize, cfg.ElasticBulkFlushInterval, cfg.ProcessorWorkers)
+	if err := batchProcessor.Run(ctx); err != nil {
 		log.Fatalf("[FATAL] Consumer loop terminated with error: %v", err)
 	}
 

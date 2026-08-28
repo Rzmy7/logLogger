@@ -111,7 +111,7 @@ var (
 			Name:      "indexing_total",
 			Help:      "Total documents indexed into Elasticsearch.",
 		},
-		[]string{"status"},
+		[]string{"mode", "status"},
 	)
 
 	ElasticsearchIndexingDuration = prometheus.NewHistogram(
@@ -121,6 +121,47 @@ var (
 			Name:      "indexing_duration_seconds",
 			Help:      "Elasticsearch document indexing latency in seconds.",
 			Buckets:   []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5},
+		},
+	)
+
+	// Micro-batched Bulk Indexing Metrics
+	BulkBatchesTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "log_platform",
+			Subsystem: "bulk",
+			Name:      "batches_total",
+			Help:      "Total number of bulk batches indexed into Elasticsearch.",
+		},
+		[]string{"status"},
+	)
+
+	BulkDocumentsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "log_platform",
+			Subsystem: "bulk",
+			Name:      "documents_total",
+			Help:      "Total number of individual documents processed within bulk batches.",
+		},
+		[]string{"status"},
+	)
+
+	BulkBatchSize = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Namespace: "log_platform",
+			Subsystem: "bulk",
+			Name:      "batch_size",
+			Help:      "Histogram of document counts per bulk batch.",
+			Buckets:   []float64{1, 5, 10, 25, 50, 100, 150, 200, 250, 500},
+		},
+	)
+
+	BulkBatchDuration = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Namespace: "log_platform",
+			Subsystem: "bulk",
+			Name:      "batch_duration_seconds",
+			Help:      "Duration of Elasticsearch bulk indexing requests in seconds.",
+			Buckets:   []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5},
 		},
 	)
 
@@ -152,7 +193,7 @@ var (
 			Namespace: "log_platform",
 			Subsystem: "processor",
 			Name:      "processing_duration_seconds",
-			Help:      "End-to-end log processing duration (parse, ES index, Redis metrics) in seconds.",
+			Help:      "End-to-end log processing duration in seconds.",
 			Buckets:   []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5},
 		},
 	)
@@ -220,6 +261,10 @@ func init() {
 		KafkaConsumerLag,
 		ElasticsearchIndexingTotal,
 		ElasticsearchIndexingDuration,
+		BulkBatchesTotal,
+		BulkDocumentsTotal,
+		BulkBatchSize,
+		BulkBatchDuration,
 		RedisOperationsTotal,
 		RedisOperationDuration,
 		ProcessingDuration,

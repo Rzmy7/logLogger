@@ -57,6 +57,35 @@ func (m *MockIndexer) IndexLog(ctx context.Context, logMsg *models.LogMessage, i
 	return nil
 }
 
+// IndexBatch records a batch of documents into memory and returns a BulkResult.
+func (m *MockIndexer) IndexBatch(ctx context.Context, docs []*models.LogDocument) (*BulkResult, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.Err != nil {
+		return nil, m.Err
+	}
+
+	result := &BulkResult{
+		TotalDocs:   len(docs),
+		SuccessDocs: len(docs),
+		FailedDocs:  0,
+		ItemSuccess: make([]bool, len(docs)),
+	}
+
+	for i, doc := range docs {
+		t, err := doc.ParsedTime()
+		if err != nil {
+			t = time.Now().UTC()
+		}
+		indexName := IndexNameForTime(t)
+		m.IndexNames = append(m.IndexNames, indexName)
+		m.Documents = append(m.Documents, doc)
+		result.ItemSuccess[i] = true
+	}
+
+	return result, nil
+}
+
 // Ping returns m.Err or nil.
 func (m *MockIndexer) Ping(ctx context.Context) error {
 	m.mu.Lock()

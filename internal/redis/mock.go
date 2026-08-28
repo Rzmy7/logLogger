@@ -107,6 +107,69 @@ func (m *MockMetricsRecorder) RecordLog(ctx context.Context, logMsg *models.LogM
 	return nil
 }
 
+// RecordBatch records metrics for a slice of log messages in memory.
+func (m *MockMetricsRecorder) RecordBatch(ctx context.Context, logs []*models.LogMessage, rawJSONs [][]byte) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.Err != nil {
+		return m.Err
+	}
+
+	today := time.Now().UTC().Format("2006-01-02")
+	for i, logMsg := range logs {
+		if logMsg == nil {
+			continue
+		}
+
+		var rawJSON []byte
+		if i < len(rawJSONs) {
+			rawJSON = rawJSONs[i]
+		}
+
+		kb := NewKeyBuilder(logMsg.Tenant())
+
+		m.Counters[kb.StatsLogsTotal()]++
+		m.Counters[kb.StatsLogsService(logMsg.Service)]++
+		m.Counters[kb.StatsLogsLevel(logMsg.Level)]++
+
+		lbKey := kb.LeaderboardServices()
+		if m.Leaderboards[lbKey] == nil {
+			m.Leaderboards[lbKey] = make(map[string]float64)
+		}
+		m.Leaderboards[lbKey][logMsg.Service]++
+
+		if logMsg.IP != "" {
+			ipKey := kb.UniqueIPs(time.Now().UTC())
+			if m.Sets[ipKey] == nil {
+				m.Sets[ipKey] = make(map[string]bool)
+			}
+			m.Sets[ipKey][logMsg.IP] = true
+		}
+
+		if logMsg.Level == "ERROR" || logMsg.Level == "FATAL" {
+			m.Counters[kb.StatsErrorsService(logMsg.Service)]++
+			m.Counters[kb.StatsErrorsLast5m(logMsg.Service)]++
+
+			errLbKey := kb.LeaderboardErrors()
+			if m.Leaderboards[errLbKey] == nil {
+				m.Leaderboards[errLbKey] = make(map[string]float64)
+			}
+			m.Leaderboards[errLbKey][logMsg.Message]++
+
+			if len(rawJSON) > 0 {
+				recentKey := kb.RecentErrors(logMsg.Service)
+				m.Lists[recentKey] = append([]string{string(rawJSON)}, m.Lists[recentKey]...)
+				if len(m.Lists[recentKey]) > 100 {
+					m.Lists[recentKey] = m.Lists[recentKey][:100]
+				}
+			}
+		}
+	}
+	_ = today
+	return nil
+}
+
 // GetLiveMetrics returns mock live metrics.
 func (m *MockMetricsRecorder) GetLiveMetrics(ctx context.Context, requestedServices []string) (int64, map[string]ServiceMetrics, error) {
 	m.mu.Lock()

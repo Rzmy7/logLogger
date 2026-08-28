@@ -11,20 +11,23 @@ import (
 
 // Config holds application configuration loaded from environment variables.
 type Config struct {
-	PostgresURL          string
-	PostgresHost         string
-	PostgresPort         string
-	PostgresDB           string
-	PostgresUser         string
-	PostgresPassword     string
-	RedisURL             string
-	KafkaBrokers         []string
-	ElasticsearchURL     string
-	HTTPPort             string
-	LogLevel             string
-	LogRetentionDays     int
-	LogRetentionInterval time.Duration
-	RetentionMetricsPort string
+	PostgresURL              string
+	PostgresHost             string
+	PostgresPort             string
+	PostgresDB               string
+	PostgresUser             string
+	PostgresPassword         string
+	RedisURL                 string
+	KafkaBrokers             []string
+	ElasticsearchURL         string
+	HTTPPort                 string
+	LogLevel                 string
+	LogRetentionDays         int
+	LogRetentionInterval     time.Duration
+	RetentionMetricsPort     string
+	ElasticBulkSize          int
+	ElasticBulkFlushInterval time.Duration
+	ProcessorWorkers         int
 }
 
 // Load reads and validates configuration from environment variables (and .env file if present).
@@ -99,6 +102,42 @@ func Load() (*Config, error) {
 		cfg.LogRetentionInterval = dur
 	}
 
+	// Parse ElasticBulkSize (default: 200)
+	bulkSizeStr := getEnv("ELASTIC_BULK_SIZE")
+	if bulkSizeStr == "" {
+		cfg.ElasticBulkSize = 200
+	} else {
+		size, err := strconv.Atoi(bulkSizeStr)
+		if err != nil || size <= 0 {
+			return nil, fmt.Errorf("invalid ELASTIC_BULK_SIZE %q (must be a positive integer)", bulkSizeStr)
+		}
+		cfg.ElasticBulkSize = size
+	}
+
+	// Parse ElasticBulkFlushInterval (default: 100ms)
+	flushIntervalStr := getEnv("ELASTIC_BULK_FLUSH_INTERVAL")
+	if flushIntervalStr == "" {
+		cfg.ElasticBulkFlushInterval = 100 * time.Millisecond
+	} else {
+		dur, err := time.ParseDuration(flushIntervalStr)
+		if err != nil || dur <= 0 {
+			return nil, fmt.Errorf("invalid ELASTIC_BULK_FLUSH_INTERVAL %q (must be a positive duration, e.g. 100ms)", flushIntervalStr)
+		}
+		cfg.ElasticBulkFlushInterval = dur
+	}
+
+	// Parse ProcessorWorkers (default: 1)
+	workersStr := getEnv("PROCESSOR_WORKERS")
+	if workersStr == "" {
+		cfg.ProcessorWorkers = 1
+	} else {
+		w, err := strconv.Atoi(workersStr)
+		if err != nil || w <= 0 {
+			return nil, fmt.Errorf("invalid PROCESSOR_WORKERS %q (must be a positive integer)", workersStr)
+		}
+		cfg.ProcessorWorkers = w
+	}
+
 	// Apply defaults
 	if cfg.HTTPPort == "" {
 		cfg.HTTPPort = "8081"
@@ -138,14 +177,7 @@ func (c *Config) validate() error {
 	}
 
 	if len(missing) > 0 {
-		return fmt.Errorf("missing required environment variable(s): %s", strings.Join(missing, ", "))
-	}
-
-	switch c.LogLevel {
-	case "debug", "info", "warn", "error":
-		// valid
-	default:
-		return fmt.Errorf("invalid LOG_LEVEL %q (allowed: debug, info, warn, error)", c.LogLevel)
+		return fmt.Errorf("missing required environment variables: %s", strings.Join(missing, ", "))
 	}
 
 	return nil

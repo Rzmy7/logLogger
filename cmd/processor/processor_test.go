@@ -2,9 +2,10 @@ package main
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
+	"fmt"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/Rzmy7/logLogger/internal/elastic"
 	"github.com/Rzmy7/logLogger/internal/kafka"
@@ -13,192 +14,344 @@ import (
 	kafkaGo "github.com/segmentio/kafka-go"
 )
 
-func TestProcessor_ValidMessage_SuccessPath(t *testing.T) {
+// MockMessageConsumer simulates Kafka message consumption for batch unit tests.
+type MockMessageConsumer struct {
+	mu          sync.Mutex
+	Messages    []kafkaGo.Message
+	Committed   []kafkaGo.Message
+	FetchErr    error
+	CommitErr   error
+	fetchIdx    int
+	closed      bool
+	fetchSignal chan struct{}
+}
+
+func NewMockMessageConsumer(msgs []kafkaGo.Message) *MockMessageConsumer {
+	return &MockMessageConsumer{
+		Messages:    msgs,
+		Committed:   make([]kafkaGo.Message, 0),
+		fetchSignal: make(chan struct{}, 1),
+	}
+}
+
+func (m *MockMessageConsumer) FetchMessage(ctx context.Context) (kafkaGo.Message, error) {
+	m.mu.Lock()
+	if m.FetchErr != nil {
+		err := m.FetchErr
+		m.mu.Unlock()
+		return kafkaGo.Message{}, err
+	}
+	if m.fetchIdx >= len(m.Messages) {
+		m.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return kafkaGo.Message{}, ctx.Err()
+		case <-time.After(10 * time.Millisecond):
+			return kafkaGo.Message{}, context.Canceled
+		}
+	}
+	msg := m.Messages[m.fetchIdx]
+	m.fetchIdx++
+	m.mu.Unlock()
+	return msg, nil
+}
+
+func (m *MockMessageConsumer) CommitMessages(ctx context.Context, msgs ...kafkaGo.Message) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.CommitErr != nil {
+		return m.CommitErr
+	}
+	m.Committed = append(m.Committed, msgs...)
+	return nil
+}
+
+func (m *MockMessageConsumer) Stats() kafkaGo.ReaderStats {
+	return kafkaGo.ReaderStats{}
+}
+
+func (m *MockMessageConsumer) Close() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.closed = true
+	return nil
+}
+
+// PartialFailureBulkIndexer simulates Elasticsearch bulk with specific item rejections.
+type PartialFailureBulkIndexer struct {
+	mu           sync.Mutex
+	FailDocIndex int // index to fail
+	IndexedDocs  []*models.LogDocument
+}
+
+func (p *PartialFailureBulkIndexer) IndexBatch(ctx context.Context, docs []*models.LogDocument) (*elastic.BulkResult, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.IndexedDocs = append(p.IndexedDocs, docs...)
+	res := &elastic.BulkResult{
+		TotalDocs:   len(docs),
+		ItemSuccess: make([]bool, len(docs)),
+	}
+
+	for i := range docs {
+		if i == p.FailDocIndex {
+			res.FailedDocs++
+			res.ItemSuccess[i] = false
+			res.Errors = append(res.Errors, elastic.BulkItemError{
+				Index:  i,
+				Status: 400,
+				Type:   "mapper_parsing_exception",
+				Reason: "invalid field type",
+			})
+		} else {
+			res.SuccessDocs++
+			res.ItemSuccess[i] = true
+		}
+	}
+	return res, nil
+}
+
+func TestBatchProcessor_ProcessBatch_Success(t *testing.T) {
 	mockES := elastic.NewMockIndexer()
 	mockRedis := redis.NewMockMetricsRecorder()
 	mockDLQ := kafka.NewMockProducer()
+	mockConsumer := NewMockMessageConsumer(nil)
+
+	cfg := BatchConfig{
+		BulkSize:      5,
+		FlushInterval: 50 * time.Millisecond,
+		ProcessorID:   "test-proc-1",
+	}
+	bp := NewBatchProcessor(cfg, mockConsumer, mockES, mockRedis, mockDLQ)
 
 	ctx := context.Background()
-	payload := []byte(`{
-		"timestamp": "2026-08-21T10:00:00Z",
-		"level": "INFO",
-		"service": "order-service",
-		"message": "Order created",
-		"trace_id": "trace-101",
-		"ip": "192.168.1.1"
-	}`)
-
-	msg := kafkaGo.Message{
-		Topic:  kafka.TopicAppLogs,
-		Key:    []byte("trace-101"),
-		Value:  payload,
-		Offset: 42,
+	msgs := []kafkaGo.Message{
+		{
+			Topic:  kafka.TopicAppLogs,
+			Key:    []byte("key-1"),
+			Value:  []byte(`{"timestamp":"2026-08-28T10:00:00Z","level":"INFO","service":"svc-1","message":"Log 1"}`),
+			Offset: 10,
+		},
+		{
+			Topic:  kafka.TopicAppLogs,
+			Key:    []byte("key-2"),
+			Value:  []byte(`{"timestamp":"2026-08-28T10:00:01Z","level":"ERROR","service":"svc-2","message":"Log 2"}`),
+			Offset: 11,
+		},
 	}
 
-	err := ProcessMessage(ctx, msg, mockES, mockRedis, mockDLQ, "test-proc-1")
-	if err != nil {
-		t.Fatalf("unexpected error processing valid message: %v", err)
+	if err := bp.ProcessBatch(ctx, msgs); err != nil {
+		t.Fatalf("unexpected error processing batch: %v", err)
 	}
 
-	// Verify Elasticsearch document
-	if len(mockES.Documents) != 1 {
-		t.Fatalf("expected 1 document in ES, got %d", len(mockES.Documents))
-	}
-	if mockES.Documents[0].Service != "order-service" {
-		t.Errorf("expected service 'order-service', got %s", mockES.Documents[0].Service)
+	// Verify ES
+	if len(mockES.Documents) != 2 {
+		t.Fatalf("expected 2 documents in ES, got %d", len(mockES.Documents))
 	}
 
-	// Verify Redis metrics
+	// Verify Redis
+	if mockRedis.Counters["stats:logs:total"] != 2 {
+		t.Errorf("expected Redis total_logs 2, got %d", mockRedis.Counters["stats:logs:total"])
+	}
+	if mockRedis.Counters["stats:errors:svc-2"] != 1 {
+		t.Errorf("expected Redis svc-2 errors 1, got %d", mockRedis.Counters["stats:errors:svc-2"])
+	}
+
+	// Verify Commits
+	if len(mockConsumer.Committed) != 2 {
+		t.Fatalf("expected 2 committed offsets, got %d", len(mockConsumer.Committed))
+	}
+}
+
+func TestBatchProcessor_PoisonAndPartialFailure(t *testing.T) {
+	partialES := &PartialFailureBulkIndexer{FailDocIndex: 1} // 2nd valid doc fails in ES
+	mockRedis := redis.NewMockMetricsRecorder()
+	mockDLQ := kafka.NewMockProducer()
+	mockConsumer := NewMockMessageConsumer(nil)
+
+	cfg := BatchConfig{
+		BulkSize:      5,
+		FlushInterval: 50 * time.Millisecond,
+		ProcessorID:   "test-proc-1",
+	}
+	bp := NewBatchProcessor(cfg, mockConsumer, partialES, mockRedis, mockDLQ)
+
+	ctx := context.Background()
+	msgs := []kafkaGo.Message{
+		{
+			Topic:  kafka.TopicAppLogs,
+			Key:    []byte("key-1"),
+			Value:  []byte(`{"timestamp":"2026-08-28T10:00:00Z","level":"INFO","service":"svc-1","message":"Log 1"}`),
+			Offset: 10,
+		},
+		{
+			Topic:  kafka.TopicAppLogs,
+			Key:    []byte("key-2"),
+			Value:  []byte(`{"timestamp":"2026-08-28T10:00:01Z","level":"ERROR","service":"svc-2","message":"Log 2 rejected by ES"}`),
+			Offset: 11,
+		},
+		{
+			Topic:  kafka.TopicAppLogs,
+			Key:    []byte("key-3"),
+			Value:  []byte(`{malformed-json-payload}`), // Poison JSON
+			Offset: 12,
+		},
+	}
+
+	if err := bp.ProcessBatch(ctx, msgs); err != nil {
+		t.Fatalf("unexpected error processing batch: %v", err)
+	}
+
+	// 2 messages should be in DLQ: 1 malformed JSON, 1 rejected by ES mapper
+	if len(mockDLQ.Messages) != 2 {
+		t.Fatalf("expected 2 DLQ messages, got %d", len(mockDLQ.Messages))
+	}
+
+	// Exactly 1 message succeeded in Redis
 	if mockRedis.Counters["stats:logs:total"] != 1 {
-		t.Errorf("expected Redis total_logs 1, got %d", mockRedis.Counters["stats:logs:total"])
-	}
-	if mockRedis.Counters["stats:logs:order-service"] != 1 {
-		t.Errorf("expected Redis service counter 1, got %d", mockRedis.Counters["stats:logs:order-service"])
+		t.Errorf("expected 1 successful log in Redis, got %d", mockRedis.Counters["stats:logs:total"])
 	}
 
-	// Verify NO messages published to DLQ
-	if len(mockDLQ.Messages) != 0 {
-		t.Errorf("expected 0 DLQ messages, got %d", len(mockDLQ.Messages))
+	// All 3 messages safely handled -> all 3 committed
+	if len(mockConsumer.Committed) != 3 {
+		t.Fatalf("expected 3 committed offsets, got %d", len(mockConsumer.Committed))
 	}
 }
 
-func TestProcessor_MalformedMessage_RoutedToDLQ(t *testing.T) {
+func TestBatchProcessor_MultiTenantIsolation(t *testing.T) {
+	mockES := elastic.NewMockIndexer()
+	mockRedis := redis.NewMockMetricsRecorder()
+	mockDLQ := kafka.NewMockProducer()
+	mockConsumer := NewMockMessageConsumer(nil)
+
+	cfg := BatchConfig{
+		BulkSize:      10,
+		FlushInterval: 50 * time.Millisecond,
+		ProcessorID:   "test-proc-1",
+	}
+	bp := NewBatchProcessor(cfg, mockConsumer, mockES, mockRedis, mockDLQ)
+
+	ctx := context.Background()
+	msgs := []kafkaGo.Message{
+		{
+			Topic:  kafka.TopicAppLogs,
+			Key:    []byte("key-a"),
+			Value:  []byte(`{"tenant_id":"tenant-alpha","timestamp":"2026-08-28T10:00:00Z","level":"INFO","service":"order-svc","message":"Alpha order"}`),
+			Offset: 20,
+		},
+		{
+			Topic:  kafka.TopicAppLogs,
+			Key:    []byte("key-b"),
+			Value:  []byte(`{"tenant_id":"tenant-beta","timestamp":"2026-08-28T10:00:01Z","level":"ERROR","service":"payment-svc","message":"Beta error"}`),
+			Offset: 21,
+		},
+		{
+			Topic:  kafka.TopicAppLogs,
+			Key:    []byte("key-c"),
+			Value:  []byte(`{"timestamp":"2026-08-28T10:00:02Z","level":"WARN","service":"auth-svc","message":"Default tenant warning"}`),
+			Offset: 22,
+		},
+	}
+
+	if err := bp.ProcessBatch(ctx, msgs); err != nil {
+		t.Fatalf("unexpected error processing multi-tenant batch: %v", err)
+	}
+
+	// Verify ES documents carry exact tenant_id
+	if len(mockES.Documents) != 3 {
+		t.Fatalf("expected 3 documents in ES, got %d", len(mockES.Documents))
+	}
+	if mockES.Documents[0].TenantID != "tenant-alpha" {
+		t.Errorf("expected tenant-alpha, got %s", mockES.Documents[0].TenantID)
+	}
+	if mockES.Documents[1].TenantID != "tenant-beta" {
+		t.Errorf("expected tenant-beta, got %s", mockES.Documents[1].TenantID)
+	}
+	if mockES.Documents[2].TenantID != models.DefaultTenantID {
+		t.Errorf("expected default tenant, got %s", mockES.Documents[2].TenantID)
+	}
+
+	// Verify Redis isolated keys
+	if mockRedis.Counters["tenant:tenant-alpha:stats:logs:total"] != 1 {
+		t.Errorf("expected tenant-alpha total_logs 1, got %d", mockRedis.Counters["tenant:tenant-alpha:stats:logs:total"])
+	}
+	if mockRedis.Counters["tenant:tenant-beta:stats:errors:payment-svc"] != 1 {
+		t.Errorf("expected tenant-beta payment errors 1, got %d", mockRedis.Counters["tenant:tenant-beta:stats:errors:payment-svc"])
+	}
+	if mockRedis.Counters["stats:logs:total"] != 1 {
+		t.Errorf("expected default tenant stats:logs:total 1, got %d", mockRedis.Counters["stats:logs:total"])
+	}
+}
+
+func TestBatchProcessor_Run_SizeTrigger(t *testing.T) {
+	msgs := make([]kafkaGo.Message, 5)
+	for i := 0; i < 5; i++ {
+		msgs[i] = kafkaGo.Message{
+			Topic:  kafka.TopicAppLogs,
+			Key:    []byte(fmt.Sprintf("key-%d", i)),
+			Value:  []byte(fmt.Sprintf(`{"timestamp":"2026-08-28T10:00:0%dZ","level":"INFO","service":"svc","message":"msg %d"}`, i, i)),
+			Offset: int64(i + 1),
+		}
+	}
+
+	mockConsumer := NewMockMessageConsumer(msgs)
 	mockES := elastic.NewMockIndexer()
 	mockRedis := redis.NewMockMetricsRecorder()
 	mockDLQ := kafka.NewMockProducer()
 
-	ctx := context.Background()
-	malformedPayload := []byte(`{invalid-json: "bad_format"`)
+	cfg := BatchConfig{
+		BulkSize:      5,
+		FlushInterval: 1 * time.Second, // Long interval to ensure size triggers it
+		ProcessorID:   "proc-1",
+	}
+	bp := NewBatchProcessor(cfg, mockConsumer, mockES, mockRedis, mockDLQ)
 
-	msg := kafkaGo.Message{
-		Topic:  kafka.TopicAppLogs,
-		Key:    []byte("bad-key"),
-		Value:  malformedPayload,
-		Offset: 99,
-	}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
 
-	err := ProcessMessage(ctx, msg, mockES, mockRedis, mockDLQ, "proc-node-7")
-	// Must return nil so Kafka offset is committed (poison message handled)
-	if err != nil {
-		t.Fatalf("expected nil error on successful DLQ route, got %v", err)
-	}
+	_ = bp.Run(ctx)
 
-	// Verify 0 writes to ES and Redis
-	if len(mockES.Documents) != 0 {
-		t.Errorf("expected 0 ES documents on malformed message, got %d", len(mockES.Documents))
+	if len(mockES.Documents) != 5 {
+		t.Errorf("expected 5 documents indexed on size trigger, got %d", len(mockES.Documents))
 	}
-	if mockRedis.Counters["stats:logs:total"] != 0 {
-		t.Errorf("expected 0 Redis total logs on malformed message, got %d", mockRedis.Counters["stats:logs:total"])
-	}
-
-	// Verify exactly 1 message in DLQ
-	if len(mockDLQ.Messages) != 1 {
-		t.Fatalf("expected 1 DLQ message, got %d", len(mockDLQ.Messages))
-	}
-
-	dlqRecord := mockDLQ.Messages[0]
-	if dlqRecord.Topic != kafka.TopicAppLogsDLQ {
-		t.Errorf("expected topic %q, got %q", kafka.TopicAppLogsDLQ, dlqRecord.Topic)
-	}
-	if dlqRecord.Key != "bad-key" {
-		t.Errorf("expected key 'bad-key', got %q", dlqRecord.Key)
-	}
-
-	var dlqMsg models.DLQMessage
-	if err := json.Unmarshal(dlqRecord.Value, &dlqMsg); err != nil {
-		t.Fatalf("failed to decode DLQ message payload: %v", err)
-	}
-
-	if dlqMsg.OriginalMessage != string(malformedPayload) {
-		t.Errorf("expected original_message %q, got %q", string(malformedPayload), dlqMsg.OriginalMessage)
-	}
-	if dlqMsg.ProcessorID != "proc-node-7" {
-		t.Errorf("expected processor_id 'proc-node-7', got %q", dlqMsg.ProcessorID)
-	}
-	if dlqMsg.Error == "" {
-		t.Error("expected non-empty error in DLQ message")
-	}
-	if dlqMsg.FailedAt == "" {
-		t.Error("expected non-empty failed_at in DLQ message")
+	if len(mockConsumer.Committed) != 5 {
+		t.Errorf("expected 5 committed messages, got %d", len(mockConsumer.Committed))
 	}
 }
 
-func TestProcessor_SchemaInvalidMessage_RoutedToDLQ(t *testing.T) {
+func TestBatchProcessor_Run_TimerTrigger(t *testing.T) {
+	msgs := make([]kafkaGo.Message, 2)
+	for i := 0; i < 2; i++ {
+		msgs[i] = kafkaGo.Message{
+			Topic:  kafka.TopicAppLogs,
+			Key:    []byte(fmt.Sprintf("key-%d", i)),
+			Value:  []byte(fmt.Sprintf(`{"timestamp":"2026-08-28T10:00:0%dZ","level":"INFO","service":"svc","message":"msg %d"}`, i, i)),
+			Offset: int64(i + 1),
+		}
+	}
+
+	mockConsumer := NewMockMessageConsumer(msgs)
 	mockES := elastic.NewMockIndexer()
 	mockRedis := redis.NewMockMetricsRecorder()
 	mockDLQ := kafka.NewMockProducer()
 
-	ctx := context.Background()
-	// Missing required level, service, timestamp
-	schemaInvalidPayload := []byte(`{"message": "missing headers"}`)
-
-	msg := kafkaGo.Message{
-		Topic:  kafka.TopicAppLogs,
-		Key:    []byte("key-0"),
-		Value:  schemaInvalidPayload,
-		Offset: 105,
+	cfg := BatchConfig{
+		BulkSize:      100,                   // Large bulk size
+		FlushInterval: 30 * time.Millisecond, // Fast timer
+		ProcessorID:   "proc-1",
 	}
+	bp := NewBatchProcessor(cfg, mockConsumer, mockES, mockRedis, mockDLQ)
 
-	err := ProcessMessage(ctx, msg, mockES, mockRedis, mockDLQ, "proc-node-1")
-	if err != nil {
-		t.Fatalf("expected nil error on schema-invalid message routed to DLQ, got %v", err)
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+
+	_ = bp.Run(ctx)
+
+	if len(mockES.Documents) != 2 {
+		t.Errorf("expected 2 documents indexed on timer trigger, got %d", len(mockES.Documents))
 	}
-
-	if len(mockDLQ.Messages) != 1 {
-		t.Fatalf("expected 1 DLQ message, got %d", len(mockDLQ.Messages))
-	}
-}
-
-func TestProcessor_DLQPublishFailure_ReturnsError(t *testing.T) {
-	mockES := elastic.NewMockIndexer()
-	mockRedis := redis.NewMockMetricsRecorder()
-	mockDLQ := kafka.NewMockProducer()
-	mockDLQ.Err = errors.New("kafka cluster unreachable for DLQ")
-
-	ctx := context.Background()
-	malformedPayload := []byte(`{broken-json}`)
-
-	msg := kafkaGo.Message{
-		Topic:  kafka.TopicAppLogs,
-		Key:    []byte("key-failed-dlq"),
-		Value:  malformedPayload,
-		Offset: 120,
-	}
-
-	err := ProcessMessage(ctx, msg, mockES, mockRedis, mockDLQ, "proc-node-1")
-	if err == nil {
-		t.Fatal("expected error when DLQ publication fails, got nil")
-	}
-}
-
-func TestProcessor_ESFailure_NotRoutedToDLQ(t *testing.T) {
-	mockES := elastic.NewMockIndexer()
-	mockES.Err = errors.New("elasticsearch network timeout")
-	mockRedis := redis.NewMockMetricsRecorder()
-	mockDLQ := kafka.NewMockProducer()
-
-	ctx := context.Background()
-	validPayload := []byte(`{
-		"timestamp": "2026-08-21T10:00:00Z",
-		"level": "INFO",
-		"service": "order-service",
-		"message": "Valid order"
-	}`)
-
-	msg := kafkaGo.Message{
-		Topic:  kafka.TopicAppLogs,
-		Key:    []byte("order-1"),
-		Value:  validPayload,
-		Offset: 150,
-	}
-
-	err := ProcessMessage(ctx, msg, mockES, mockRedis, mockDLQ, "proc-node-1")
-	if err == nil {
-		t.Fatal("expected error on transient ES failure, got nil")
-	}
-
-	// Transient failures must NOT be sent to DLQ
-	if len(mockDLQ.Messages) != 0 {
-		t.Errorf("transient downstream failure should not route to DLQ, got %d messages", len(mockDLQ.Messages))
+	if len(mockConsumer.Committed) != 2 {
+		t.Errorf("expected 2 committed messages, got %d", len(mockConsumer.Committed))
 	}
 }

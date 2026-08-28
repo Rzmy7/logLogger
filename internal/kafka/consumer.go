@@ -22,6 +22,14 @@ const (
 // MessageHandler is a callback function invoked for each consumed Kafka message.
 type MessageHandler func(ctx context.Context, msg kafkaGo.Message) error
 
+// MessageConsumer defines the contract for fetching and committing Kafka messages.
+type MessageConsumer interface {
+	FetchMessage(ctx context.Context) (kafkaGo.Message, error)
+	CommitMessages(ctx context.Context, msgs ...kafkaGo.Message) error
+	Stats() kafkaGo.ReaderStats
+	Close() error
+}
+
 // Consumer wraps a segmentio/kafka-go Reader to consume messages from Kafka topics.
 type Consumer struct {
 	reader *kafkaGo.Reader
@@ -52,6 +60,25 @@ func NewConsumer(brokers []string, groupID, topic string) (*Consumer, error) {
 	return &Consumer{
 		reader: reader,
 	}, nil
+}
+
+// FetchMessage fetches a single message without committing.
+func (c *Consumer) FetchMessage(ctx context.Context) (kafkaGo.Message, error) {
+	if c.reader == nil {
+		return kafkaGo.Message{}, errors.New("reader is not initialized")
+	}
+	return c.reader.FetchMessage(ctx)
+}
+
+// CommitMessages commits offsets for the given messages.
+func (c *Consumer) CommitMessages(ctx context.Context, msgs ...kafkaGo.Message) error {
+	if c.reader == nil {
+		return errors.New("reader is not initialized")
+	}
+	if len(msgs) == 0 {
+		return nil
+	}
+	return c.reader.CommitMessages(ctx, msgs...)
 }
 
 // Stats returns reader statistics including consumer lag.

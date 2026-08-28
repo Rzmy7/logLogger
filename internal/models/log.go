@@ -1,6 +1,9 @@
 package models
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -45,6 +48,22 @@ type LogDocument struct {
 	TraceID    string `json:"trace_id,omitempty"`
 	IP         string `json:"ip,omitempty"`
 	IngestedAt string `json:"ingested_at"`
+}
+
+// DeterministicID produces a stable 32-hex character identifier from log identity for idempotent indexing retries.
+func (d *LogDocument) DeterministicID() string {
+	raw := fmt.Sprintf("%s|%s|%s|%s|%s|%s", d.TenantID, d.Service, d.Level, d.Timestamp, d.TraceID, d.Message)
+	h := sha256.Sum256([]byte(raw))
+	return hex.EncodeToString(h[:16]) // 16 bytes = 32 hex chars
+}
+
+// ParsedTime parses the RFC3339 timestamp of the LogDocument.
+func (d *LogDocument) ParsedTime() (time.Time, error) {
+	t, err := time.Parse(time.RFC3339Nano, d.Timestamp)
+	if err != nil {
+		return time.Parse(time.RFC3339, d.Timestamp)
+	}
+	return t, nil
 }
 
 // ToDocument converts a LogMessage to an Elasticsearch LogDocument.

@@ -92,6 +92,82 @@
       "collapsed": false,
       "gridPos": { "h": 1, "w": 24, "x": 0, "y": 8 },
       "id": 101,
+      "title": "Micro-Batched Bulk Indexing Performance",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "axisCenteredZero": false, "drawStyle": "line", "fillOpacity": 15, "lineWidth": 2 },
+          "unit": "ops"
+        }
+      },
+      "gridPos": { "h": 7, "w": 6, "x": 0, "y": 9 },
+      "id": 9,
+      "targets": [
+        { "expr": "sum(rate(log_platform_bulk_batches_total[1m])) by (status)", "legendFormat": "Batches/s ({{status}})", "refId": "A" }
+      ],
+      "title": "Bulk Batches Throughput",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "axisCenteredZero": false, "drawStyle": "line", "fillOpacity": 15, "lineWidth": 2 },
+          "unit": "dps"
+        }
+      },
+      "gridPos": { "h": 7, "w": 6, "x": 6, "y": 9 },
+      "id": 10,
+      "targets": [
+        { "expr": "sum(rate(log_platform_bulk_documents_total[1m])) by (status)", "legendFormat": "Docs/s ({{status}})", "refId": "A" }
+      ],
+      "title": "Bulk Documents Throughput",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "axisCenteredZero": false, "drawStyle": "line", "fillOpacity": 15, "lineWidth": 2 },
+          "unit": "s"
+        }
+      },
+      "gridPos": { "h": 7, "w": 6, "x": 12, "y": 9 },
+      "id": 11,
+      "targets": [
+        { "expr": "histogram_quantile(0.95, sum(rate(log_platform_bulk_batch_duration_seconds_bucket[1m])) by (le))", "legendFormat": "Bulk Duration p95", "refId": "A" },
+        { "expr": "histogram_quantile(0.50, sum(rate(log_platform_bulk_batch_duration_seconds_bucket[1m])) by (le))", "legendFormat": "Bulk Duration p50", "refId": "B" }
+      ],
+      "title": "Elasticsearch _bulk Latency",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "axisCenteredZero": false, "drawStyle": "line", "fillOpacity": 15, "lineWidth": 2 },
+          "unit": "short"
+        }
+      },
+      "gridPos": { "h": 7, "w": 6, "x": 18, "y": 9 },
+      "id": 12,
+      "targets": [
+        { "expr": "histogram_quantile(0.95, sum(rate(log_platform_bulk_batch_size_bucket[1m])) by (le))", "legendFormat": "Batch Size p95", "refId": "A" }
+      ],
+      "title": "Batch Size Distribution",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 16 },
+      "id": 102,
       "title": "Latency Profiles",
       "type": "row"
     },
@@ -104,7 +180,7 @@
           "unit": "s"
         }
       },
-      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 9 },
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 17 },
       "id": 5,
       "targets": [
         { "expr": "histogram_quantile(0.50, sum(rate(log_platform_http_request_duration_seconds_bucket{service=\"ingestor\"}[1m])) by (le))", "legendFormat": "Ingestion p50", "refId": "A" },
@@ -123,7 +199,7 @@
           "unit": "s"
         }
       },
-      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 9 },
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 17 },
       "id": 6,
       "targets": [
         { "expr": "histogram_quantile(0.50, sum(rate(log_platform_processor_processing_duration_seconds_bucket[1m])) by (le))", "legendFormat": "Processing p50", "refId": "A" },
@@ -135,8 +211,8 @@
     },
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 16 },
-      "id": 102,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 24 },
+      "id": 103,
       "title": "Storage Sinks (Elasticsearch & Redis)",
       "type": "row"
     },
@@ -149,7 +225,7 @@
           "unit": "ops"
         }
       },
-      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 17 },
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 25 },
       "id": 7,
       "targets": [
         { "expr": "sum(rate(log_platform_elasticsearch_indexing_total[1m])) by (status)", "legendFormat": "Elasticsearch Indexing ({{status}})", "refId": "A" },
@@ -167,7 +243,7 @@
           "unit": "ops"
         }
       },
-      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 17 },
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 25 },
       "id": 8,
       "targets": [
         { "expr": "sum(rate(log_platform_redis_operations_total[1m])) by (status)", "legendFormat": "Redis Op ({{status}})", "refId": "A" },
@@ -186,5 +262,5 @@
   "timezone": "browser",
   "title": "Log Platform Overview",
   "uid": "log-platform-overview",
-  "version": 1
+  "version": 2
 }
