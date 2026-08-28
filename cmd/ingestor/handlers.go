@@ -14,6 +14,7 @@ import (
 
 // LogPayload represents an incoming log ingestion request.
 type LogPayload struct {
+	TenantID  string `json:"tenant_id,omitempty"`
 	Timestamp string `json:"timestamp"`
 	Level     string `json:"level"`
 	Service   string `json:"service"`

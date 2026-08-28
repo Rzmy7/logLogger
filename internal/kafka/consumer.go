@@ -51,9 +51,10 @@ func NewConsumer(brokers []string, groupID, topic string) (*Consumer, error) {
 		Brokers:        brokers,
 		GroupID:        groupID,
 		Topic:          topic,
-		MinBytes:       10e3, // 10KB
+		MinBytes:       1,
 		MaxBytes:       10e6, // 10MB
-		CommitInterval: 0,    // Explicit manual commit only
+		MaxWait:        50 * time.Millisecond,
+		CommitInterval: 0, // Explicit manual commit only
 		StartOffset:    kafkaGo.FirstOffset,
 	})
 
