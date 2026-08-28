@@ -12,43 +12,43 @@
 ## 🏗️ Architecture & Data Flow
 
 ```
-                                  ┌─────────────────────────────────────────┐
-                                  │           Prometheus (:9090)            │
-                                  │                   │                     │
-                                  │           Grafana (:3000)               │
-                                  └───────▲───────────▲───────────▲─────────┘
-                                          │           │           │
-                                       scrape      scrape      scrape
-                                          │           │           │
-┌────────────────┐  HTTP POST   ┌─────────┴──────┐    │    ┌──────┴─────────┐
-│   Log Client   ├─────────────►│ Ingestor API   │    │    │ Analytics API  │
-│  (App / Agent) │  (/api/v1)   │ (:8081)        │    │    │ (:8082)        │
-└────────────────┘              └────────┬───────┘    │    └────▲──────▲────┘
-                                         │            │         │      │
-                                   Publish to         │      Search   Metrics
-                                   "app-logs"         │         │      │
-                                         ▼            │         │      │
-                                ┌─────────────────┐   │         │      │
-                                │  Apache Kafka   │   │         │      │
-                                └────────┬────────┘   │         │      │
-                                         │            │         │      │
-                                      Consume         │         │      │
-                                         ▼            │         │      │
-                                ┌─────────────────┴─┐ │         │      │
-                                │ Stream Processor  ├─┘         │      │
-                                │ (Metrics :8083)   │           │      │
-                                └───┬─────────────┬─┘           │      │
-                                    │             │             │      │
-                       Parse Error  │             │ Valid Log   │      │
-                            ▼       │             ▼             │      │
-                 ┌──────────────────┴─┐   ┌─────────────────┐   │      │
-                 │   Kafka DLQ Topic  │   │  Elasticsearch  ├───┘      │
-                 │   (app-logs-dlq)   │   │  (logs-v1-*)    │          │
-                 └────────────────────┘   └─────────────────┘          │
-                                          ┌─────────────────┐          │
-                                          │   Redis Cache   ├──────────┘
-                                          │  (Real-Time)    │
-                                          └─────────────────┘
+                                  ┌───────────────────────────────────────────────────┐
+                                  │                Prometheus (:9090)                 │
+                                  │                        │                          │
+                                  │                Grafana (:3000)                    │
+                                  └───▲────────────▲───────────────▲──────────────▲───┘
+                                      │            │               │              │
+                                   scrape       scrape          scrape         scrape
+                                      │            │               │              │
+┌────────────────┐  HTTP POST   ┌─────┴────────┐   │    ┌──────────┴─────┐ ┌──────┴─────────┐
+│   Log Client   ├─────────────►│ Ingestor API │   │    │ Analytics API  │ │ Retention Svc  │
+│  (App / Agent) │  (/api/v1)   │ (:8081)      │   │    │ (:8082)        │ │ (:8084)        │
+└────────────────┘              └──────┬───────┘   │    └────▲──────▲────┘ └──────┬─────────┘
+                                       │           │         │      │             │
+                                 Publish to        │      Search   Metrics    Retention
+                                 "app-logs"        │         │      │           Runner
+                                       ▼           │         │      │             │
+                              ┌────────────────┐   │         │      │             │
+                              │  Apache Kafka  │   │         │      │             │
+                              └────────┬───────┘   │         │      │             │
+                                       │           │         │      │             │
+                                    Consume        │         │      │             │
+                                       ▼           │         │      │             │
+                              ┌────────────────┴─┐ │         │      │             │
+                              │ Stream Processor ├─┘         │      │             │
+                              │ (Metrics :8083)  │           │      │             │
+                              └───┬────────────┬─┘           │      │             │
+                                  │            │             │      │             │
+                     Parse Error  │            │ Valid Log   │      │             │
+                          ▼       │            ▼             │      │             │
+               ┌──────────────────┴─┐  ┌─────────────────┐   │      │             │
+               │   Kafka DLQ Topic  │  │  Elasticsearch  ├───┘      │◄────────────┘
+               │   (app-logs-dlq)   │  │  (logs-v1-*)    │          │  (Index Lifecycle)
+               └────────────────────┘  └─────────────────┘          │
+                                       ┌─────────────────┐          │
+                                       │   Redis Cache   ├──────────┘
+                                       │  (Real-Time)    │
+                                       └─────────────────┘
 ```
 
 ### End-to-End Pipeline Stages
@@ -65,11 +65,16 @@
    - Routes permanently invalid/malformed payloads to `app-logs-dlq` with failure diagnostics.
    - Indexes valid documents into Elasticsearch daily indices (`logs-v1-YYYY.MM.DD`).
    - Atomically updates real-time counters, sliding 5-minute error windows, and sorted-set leaderboards in Redis.
-4. **Analytics API (`cmd/analytics` on `:8082`)**:
+4. **Analytics & Admin API (`cmd/analytics` on `:8082`)**:
    - Serves sub-10ms real-time metric aggregations and leaderboards from Redis.
    - Executes full-text search with boolean match filters and timestamp range filtering in Elasticsearch.
-5. **Observability (Prometheus `:9090` & Grafana `:3000`)**:
-   - Pulls metrics every 2s across Ingestor, Processor, and Analytics API.
+   - Exposes administrative log lifecycle endpoints (`/admin/logs/*`) for on-demand deletion and storage telemetry.
+5. **Retention Management Service (`cmd/retention` on `:8084`)**:
+   - Periodically identifies Elasticsearch log indices matching `logs-v1-YYYY.MM.DD` older than `LOG_RETENTION_DAYS`.
+   - Safely deletes expired indices while strictly protecting today's active write index.
+   - Exposes Prometheus metrics and structured execution telemetry.
+6. **Observability (Prometheus `:9090` & Grafana `:3000`)**:
+   - Pulls metrics every 2s across Ingestor, Processor, Analytics, and Retention services.
    - Visualizes ingestion rate, consumer lag, DLQ events, and storage latencies in a provisioned dashboard.
 
 ---
@@ -81,7 +86,8 @@
 | **Backend Language** | Go (Golang 1.24+) | High-performance, concurrent service binaries |
 | **HTTP Routing** | Chi v5 | Lightweight, idiomatic HTTP routing & middleware |
 | **Message Broker** | Apache Kafka 3.7 (KRaft) | Distributed log streaming, consumer groups, DLQ |
-| **Search Engine** | Elasticsearch 8.11 | Full-text log search with strict index templates |
+| **Search Engine** | Elasticsearch 8.11 | Full-text log search with strict index templates & lifecycle |
+| **Retention Manager**| Dedicated Go daemon (`cmd/retention`) | Automated daily index retention & safe cleanup |
 | **Metrics Cache** | Redis 7 / Upstash TLS | Real-time counters, sliding error windows, leaderboards |
 | **Relational Store** | PostgreSQL 15 | Metadata, applications, services, alert rules |
 | **Metrics Scraping** | Prometheus 2.51 | Time-series metric scraping and aggregation |
@@ -305,6 +311,26 @@ curl -s "http://localhost:8082/search?q=Stripe&service=payment-api&level=ERROR&p
     "timestamp": "2026-08-24T12:00:06Z"
   }
 }
+```
+
+### 6. Storage Statistics & Index Information
+```bash
+curl -s http://localhost:8082/admin/logs/stats
+```
+
+### 7. Trigger Manual Retention Cycle
+```bash
+curl -X POST "http://localhost:8082/admin/logs/retention/run?days=30"
+```
+
+### 8. Safely Delete Historical Index by Name
+```bash
+curl -X DELETE http://localhost:8082/admin/logs/indices/logs-v1-2026.08.01
+```
+
+### 9. Delete Historical Indices Before Date
+```bash
+curl -X DELETE "http://localhost:8082/admin/logs?before=2026-08-01T00:00:00Z"
 ```
 
 ---

@@ -25,6 +25,7 @@ const (
 // IndexTemplateDefinition holds the documented Elasticsearch index template JSON.
 const IndexTemplateDefinition = `{
   "index_patterns": ["logs-v1-*"],
+  "priority": 200,
   "template": {
     "settings": {
       "number_of_shards": 1,
@@ -300,8 +301,9 @@ func (c *Client) SearchLogs(ctx context.Context, params SearchParams) (*SearchRe
 		"sort": []any{
 			map[string]any{"timestamp": "desc"},
 		},
-		"from": fromOffset,
-		"size": size,
+		"track_total_hits": true,
+		"from":             fromOffset,
+		"size":             size,
 	}
 
 	queryJSON, err := json.Marshal(queryBody)

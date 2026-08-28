@@ -28,5 +28,13 @@ func NewRouter(h *Handler) http.Handler {
 	r.Get("/metrics/top-services", h.TopServices)
 	r.Get("/search", h.Search)
 
+	// Administrative Log Lifecycle Routes
+	r.Route("/admin/logs", func(r chi.Router) {
+		r.Get("/stats", h.GetLogStats)
+		r.Post("/retention/run", h.RunRetention)
+		r.Delete("/", h.DeleteLogsBefore)
+		r.Delete("/indices/{index}", h.DeleteIndex)
+	})
+
 	return r
 }

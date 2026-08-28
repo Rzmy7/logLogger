@@ -442,7 +442,143 @@ Host: localhost:8082
 
 ---
 
-### 4.6 `GET /services`
+### 4.7 `GET /admin/logs/stats`
+
+Get cluster-level storage statistics and list of active/historical log indices from Elasticsearch.
+
+**Request:**
+```http
+GET /admin/logs/stats HTTP/1.1
+Host: localhost:8082
+```
+
+**Response `200 OK`:**
+```json
+{
+  "data": {
+    "total_logs": 34925,
+    "total_indices": 3,
+    "total_size_bytes": 7157586,
+    "oldest_index": "logs-v1-2026.08.01",
+    "oldest_log_date": "2026-08-01T00:00:00Z",
+    "newest_index": "logs-v1-2026.08.28",
+    "newest_log_date": "2026-08-28T00:00:00Z",
+    "indices": [
+      {
+        "name": "logs-v1-2026.08.01",
+        "doc_count": 12000,
+        "store_size_bytes": 2450000,
+        "creation_date": "2026-08-01T00:00:00Z",
+        "status": "open"
+      },
+      {
+        "name": "logs-v1-2026.08.28",
+        "doc_count": 22925,
+        "store_size_bytes": 4707586,
+        "creation_date": "2026-08-28T00:00:00Z",
+        "status": "open"
+      }
+    ]
+  },
+  "meta": { "request_id": "req_stats_01", "timestamp": "2026-08-28T12:00:00Z" }
+}
+```
+
+---
+
+### 4.8 `POST /admin/logs/retention/run`
+
+Manually trigger an immediate retention cycle with a specified retention period.
+
+**Request:**
+```http
+POST /admin/logs/retention/run?days=30 HTTP/1.1
+Host: localhost:8082
+```
+
+**Query Parameters:**
+
+| Param | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `days` | int | No | 30 | Retention window in days (must be positive integer) |
+
+**Response `200 OK`:**
+```json
+{
+  "data": {
+    "evaluated_count": 5,
+    "deleted_count": 2,
+    "deleted_indices": [
+      "logs-v1-2026.07.01",
+      "logs-v1-2026.07.02"
+    ],
+    "cutoff_date": "2026-07-29T00:00:00Z",
+    "duration": 124000000
+  },
+  "meta": { "request_id": "req_ret_01", "timestamp": "2026-08-28T12:00:00Z" }
+}
+```
+
+---
+
+### 4.9 `DELETE /admin/logs/indices/{index}`
+
+Safely delete a specific historical log index by name.
+
+**Safety Rules:**
+- Only operates on `logs-v1-YYYY.MM.DD` index format.
+- Strictly rejects deletion of today's active write index (`422 Unprocessable Entity`).
+- Rejects non-log and system indices (`400 Bad Request`).
+
+**Request:**
+```http
+DELETE /admin/logs/indices/logs-v1-2026.08.01 HTTP/1.1
+Host: localhost:8082
+```
+
+**Response `200 OK`:**
+```json
+{
+  "data": {
+    "deleted_index": "logs-v1-2026.08.01",
+    "status": "deleted"
+  },
+  "meta": { "request_id": "req_del_01", "timestamp": "2026-08-28T12:00:00Z" }
+}
+```
+
+---
+
+### 4.10 `DELETE /admin/logs?before=<RFC3339>`
+
+Delete all historical log indices created strictly before a cutoff timestamp.
+
+**Request:**
+```http
+DELETE /admin/logs?before=2026-08-01T00:00:00Z HTTP/1.1
+Host: localhost:8082
+```
+
+**Response `200 OK`:**
+```json
+{
+  "data": {
+    "evaluated_count": 4,
+    "deleted_count": 2,
+    "deleted_indices": [
+      "logs-v1-2026.07.15",
+      "logs-v1-2026.07.20"
+    ],
+    "cutoff_date": "2026-08-01T00:00:00Z",
+    "duration": 98000000
+  },
+  "meta": { "request_id": "req_del_before_01", "timestamp": "2026-08-28T12:00:00Z" }
+}
+```
+
+---
+
+### 4.11 `GET /services`
 
 List all services with their application and environment (PostgreSQL join).
 

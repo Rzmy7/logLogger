@@ -436,6 +436,30 @@ Use **environment variables** for all configuration, parsed by `github.com/caarl
 
 ---
 
+---
+
+## ADR-014: Elasticsearch Log Lifecycle & Dedicated Retention Management Service
+
+### Context
+High-volume log ingestion continuously expands Elasticsearch storage. Without automated lifecycle management, disk usage grows unbounded. We need a robust, configurable retention policy and administrative API while preserving architectural separation of concerns and storage boundaries.
+
+### Decision
+1. **Index-Level Retention:** Leverage the existing daily index strategy (`logs-v1-YYYY.MM.DD`) to delete entire expired indices via the Elasticsearch Delete Index API rather than deleting individual documents. Dropping an entire index is an immediate \(O(1)\) metadata operation that instantly frees disk space without triggering expensive Lucene document tombstoning and segment merges.
+2. **Dedicated Retention Service (`cmd/retention`):** Run the automated background periodic retention runner as a dedicated standalone service rather than embedding it inside Analytics API instances. This prevents multiple API replicas from competing for retention execution and adheres to the Single Responsibility Principle.
+3. **Admin API Separation:** Analytics API (`cmd/analytics`) exposes administrative REST endpoints (`/admin/logs/*`) that directly invoke the `retention.Manager` for on-demand actions (manual retention runs, index deletion, storage statistics), with strict safety guards preventing deletion of the current active write index.
+4. **Storage Responsibilities:**
+   - **Elasticsearch:** Source of truth for log documents, full-text search, and index lifecycle.
+   - **Redis:** Fast derived real-time metrics (counters, 5m sliding windows, leaderboards). Cumulative Redis metrics are **not** decremented upon Elasticsearch index drops to preserve performance and avoid massive Redis key scans; metric reconciliation is marked as a future milestone.
+   - **PostgreSQL:** Future metadata/configuration repository (tenants, applications, retention policies, alert rules). PostgreSQL is not placed in the raw log data path.
+
+### Safety Guarantees
+- Only operates on `logs-v1-YYYY.MM.DD` formatted indices.
+- Strictly protects today's active write index (`logs-v1-<today>`) from retention or manual deletion (returns HTTP 422).
+- Rejects non-log indices, system indices (`.kibana`, `.security`), and arbitrary queries (returns HTTP 400).
+- Exposes Prometheus operational telemetry (`log_platform_retention_*`, `log_platform_admin_deletions_*`).
+
+---
+
 ## Summary Table
 
 | # | Decision | Status | Reversibility |
@@ -453,7 +477,9 @@ Use **environment variables** for all configuration, parsed by `github.com/caarl
 | 011 | segmentio/kafka-go | Accepted | Medium (swap client library) |
 | 012 | log/slog for logging | Accepted | Easy (swap handler) |
 | 013 | Environment-based config | Accepted | Easy (add file config later) |
+| 014 | Index lifecycle & dedicated retention service | Accepted | Medium (swap lifecycle manager) |
 
 ---
 
 *This document captures the reasoning behind every major technical choice. In interviews, expect questions like "Why Kafka over RabbitMQ?" or "Why not just use PostgreSQL for everything?" The answers are here.*
+

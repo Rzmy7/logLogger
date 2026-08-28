@@ -3,17 +3,22 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // Config holds application configuration loaded from environment variables.
 type Config struct {
-	PostgresURL      string
-	RedisURL         string
-	KafkaBrokers     []string
-	ElasticsearchURL string
-	HTTPPort         string
-	LogLevel         string
+	PostgresURL          string
+	RedisURL             string
+	KafkaBrokers         []string
+	ElasticsearchURL     string
+	HTTPPort             string
+	LogLevel             string
+	LogRetentionDays     int
+	LogRetentionInterval time.Duration
+	RetentionMetricsPort string
 }
 
 // Load reads and validates configuration from environment variables (and .env file if present).
@@ -22,11 +27,12 @@ func Load() (*Config, error) {
 	loadEnvFile(".env")
 
 	cfg := &Config{
-		PostgresURL:      getEnv("POSTGRES_URL"),
-		RedisURL:         getEnvWithFallback("REDIS_URL", "REDIS_ADDR"),
-		ElasticsearchURL: getEnvWithFallback("ELASTICSEARCH_URL", "ES_URL"),
-		HTTPPort:         getEnv("HTTP_PORT"),
-		LogLevel:         strings.ToLower(getEnv("LOG_LEVEL")),
+		PostgresURL:          getEnv("POSTGRES_URL"),
+		RedisURL:             getEnvWithFallback("REDIS_URL", "REDIS_ADDR"),
+		ElasticsearchURL:     getEnvWithFallback("ELASTICSEARCH_URL", "ES_URL"),
+		HTTPPort:             getEnv("HTTP_PORT"),
+		LogLevel:             strings.ToLower(getEnv("LOG_LEVEL")),
+		RetentionMetricsPort: getEnv("RETENTION_METRICS_PORT"),
 	}
 
 	// Parse Kafka brokers
@@ -40,11 +46,41 @@ func Load() (*Config, error) {
 		}
 	}
 
+	// Parse LogRetentionDays (default: 30)
+	retentionDaysStr := getEnv("LOG_RETENTION_DAYS")
+	if retentionDaysStr == "" {
+		cfg.LogRetentionDays = 30
+	} else {
+		days, err := strconv.Atoi(retentionDaysStr)
+		if err != nil || days <= 0 {
+			return nil, fmt.Errorf("invalid LOG_RETENTION_DAYS %q (must be a positive integer)", retentionDaysStr)
+		}
+		cfg.LogRetentionDays = days
+	}
+
+	// Parse LogRetentionInterval (default: 1 hour)
+	retentionIntervalStr := getEnv("LOG_RETENTION_INTERVAL")
+	if retentionIntervalStr == "" {
+		cfg.LogRetentionInterval = 1 * time.Hour
+	} else {
+		dur, err := time.ParseDuration(retentionIntervalStr)
+		if err != nil || dur <= 0 {
+			return nil, fmt.Errorf("invalid LOG_RETENTION_INTERVAL %q (must be a valid positive duration, e.g. 1h, 30m)", retentionIntervalStr)
+		}
+		cfg.LogRetentionInterval = dur
+	}
+
 	// Apply defaults
 	if cfg.HTTPPort == "" {
 		cfg.HTTPPort = "8081"
 	} else {
 		cfg.HTTPPort = strings.TrimPrefix(cfg.HTTPPort, ":")
+	}
+
+	if cfg.RetentionMetricsPort == "" {
+		cfg.RetentionMetricsPort = "8084"
+	} else {
+		cfg.RetentionMetricsPort = strings.TrimPrefix(cfg.RetentionMetricsPort, ":")
 	}
 
 	if cfg.LogLevel == "" {

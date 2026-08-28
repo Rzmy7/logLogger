@@ -7,6 +7,7 @@ import (
 	"github.com/Rzmy7/logLogger/internal/config"
 	"github.com/Rzmy7/logLogger/internal/elastic"
 	"github.com/Rzmy7/logLogger/internal/redis"
+	"github.com/Rzmy7/logLogger/internal/retention"
 )
 
 func main() {
@@ -16,7 +17,7 @@ func main() {
 		log.Fatalf("Failed to load configuration: %v", err)
 	}
 
-	// 2. Initialize Elasticsearch Searcher
+	// 2. Initialize Elasticsearch Client
 	esClient, err := elastic.NewClient(cfg.ElasticsearchURL)
 	if err != nil {
 		log.Fatalf("Failed to initialize Elasticsearch client: %v", err)
@@ -33,11 +34,14 @@ func main() {
 		}
 	}()
 
-	// 4. Initialize Handlers and Router
-	h := NewHandler(redisClient, esClient)
+	// 4. Initialize Retention Manager for Admin APIs
+	retentionManager := retention.NewManager(esClient)
+
+	// 5. Initialize Handlers and Router
+	h := NewHandler(redisClient, esClient, retentionManager)
 	r := NewRouter(h)
 
-	// 5. Initialize & Start HTTP Server
+	// 6. Initialize & Start HTTP Server
 	port := os.Getenv("ANALYTICS_PORT")
 	if port == "" {
 		port = "8082"

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -11,6 +12,8 @@ import (
 
 	"github.com/Rzmy7/logLogger/internal/elastic"
 	"github.com/Rzmy7/logLogger/internal/redis"
+	"github.com/Rzmy7/logLogger/internal/retention"
+	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 )
 
@@ -40,15 +43,17 @@ type APIErrorResponse struct {
 
 // Handler holds dependencies for the Analytics API.
 type Handler struct {
-	redisClient redis.MetricsReader
-	esClient    elastic.Searcher
+	redisClient      redis.MetricsReader
+	esClient         elastic.Searcher
+	retentionManager retention.Manager
 }
 
 // NewHandler creates a new Analytics API Handler.
-func NewHandler(redisClient redis.MetricsReader, esClient elastic.Searcher) *Handler {
+func NewHandler(redisClient redis.MetricsReader, esClient elastic.Searcher, retentionManager retention.Manager) *Handler {
 	return &Handler{
-		redisClient: redisClient,
-		esClient:    esClient,
+		redisClient:      redisClient,
+		esClient:         esClient,
+		retentionManager: retentionManager,
 	}
 }
 
@@ -73,55 +78,52 @@ func writeJSON(w http.ResponseWriter, status int, data any) {
 }
 
 func writeError(w http.ResponseWriter, r *http.Request, status int, code, message string, details any) {
-	writeJSON(w, status, APIErrorResponse{
-		Error: struct {
-			Code    string `json:"code"`
-			Message string `json:"message"`
-			Details any    `json:"details,omitempty"`
-		}{
-			Code:    code,
-			Message: message,
-			Details: details,
-		},
+	resp := APIErrorResponse{
 		Meta: getMeta(r),
-	})
+	}
+	resp.Error.Code = code
+	resp.Error.Message = message
+	resp.Error.Details = details
+
+	writeJSON(w, status, resp)
 }
 
-// HealthCheck handles GET /health.
+// HealthCheck verifies availability of dependencies (Elasticsearch, Redis).
 func (h *Handler) HealthCheck(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
-	defer cancel()
+	redisCtx, redisCancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer redisCancel()
 
-	services := map[string]string{
-		"redis":         "up",
-		"elasticsearch": "up",
+	redisStatus := "healthy"
+	if err := h.redisClient.Ping(redisCtx); err != nil {
+		redisStatus = fmt.Sprintf("unreachable: %v", err)
 	}
 
-	status := "healthy"
+	esCtx, esCancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer esCancel()
+
+	esStatus := "healthy"
+	if err := h.esClient.Ping(esCtx); err != nil {
+		esStatus = fmt.Sprintf("unreachable: %v", err)
+	}
+
+	overallStatus := "healthy"
 	httpStatus := http.StatusOK
-
-	if err := h.redisClient.Ping(ctx); err != nil {
-		services["redis"] = "down"
-		status = "degraded"
-		httpStatus = http.StatusServiceUnavailable
-	}
-
-	if err := h.esClient.Ping(ctx); err != nil {
-		services["elasticsearch"] = "down"
-		status = "degraded"
+	if redisStatus != "healthy" || esStatus != "healthy" {
+		overallStatus = "degraded"
 		httpStatus = http.StatusServiceUnavailable
 	}
 
 	writeJSON(w, httpStatus, map[string]any{
-		"data": map[string]any{
-			"status":   status,
-			"services": services,
+		"status": overallStatus,
+		"dependencies": map[string]string{
+			"redis":         redisStatus,
+			"elasticsearch": esStatus,
 		},
 		"meta": getMeta(r),
 	})
 }
 
-// LiveMetrics handles GET /metrics/live.
+// LiveMetrics returns real-time log counts and per-service error counts.
 func (h *Handler) LiveMetrics(w http.ResponseWriter, r *http.Request) {
 	servicesParam := r.URL.Query().Get("services")
 	var requestedServices []string
@@ -134,82 +136,94 @@ func (h *Handler) LiveMetrics(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	totalLogs, servicesMap, err := h.redisClient.GetLiveMetrics(r.Context(), requestedServices)
+	totalLogs, serviceMetrics, err := h.redisClient.GetLiveMetrics(r.Context(), requestedServices)
 	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to retrieve live metrics", nil)
+		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", fmt.Sprintf("Failed to query live metrics: %v", err), nil)
 		return
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"data": map[string]any{
 			"total_logs": totalLogs,
-			"services":   servicesMap,
+			"services":   serviceMetrics,
 		},
 		"meta": getMeta(r),
 	})
 }
 
-// TopErrors handles GET /metrics/top-errors.
+// TopErrors returns top ranked error messages from Redis sorted set.
 func (h *Handler) TopErrors(w http.ResponseWriter, r *http.Request) {
-	n := 5
-	if nStr := r.URL.Query().Get("n"); nStr != "" {
-		if val, err := strconv.Atoi(nStr); err == nil && val > 0 {
-			n = val
+	nStr := r.URL.Query().Get("n")
+	n := 10
+	if nStr != "" {
+		parsed, err := strconv.Atoi(nStr)
+		if err != nil || parsed <= 0 {
+			writeError(w, r, http.StatusBadRequest, "VALIDATION_ERROR", "Query param 'n' must be a positive integer", ErrorDetail{
+				Field:    "n",
+				Expected: "positive integer",
+				Received: nStr,
+			})
+			return
 		}
+		n = parsed
 	}
 
 	topErrors, err := h.redisClient.GetTopErrors(r.Context(), n)
 	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to retrieve top errors", nil)
+		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", fmt.Sprintf("Failed to query top errors: %v", err), nil)
 		return
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"data": map[string]any{
-			"top_errors": topErrors,
-		},
+		"data": topErrors,
 		"meta": getMeta(r),
 	})
 }
 
-// TopServices handles GET /metrics/top-services.
+// TopServices returns service rankings by log volume from Redis sorted set.
 func (h *Handler) TopServices(w http.ResponseWriter, r *http.Request) {
-	n := 5
-	if nStr := r.URL.Query().Get("n"); nStr != "" {
-		if val, err := strconv.Atoi(nStr); err == nil && val > 0 {
-			n = val
+	nStr := r.URL.Query().Get("n")
+	n := 10
+	if nStr != "" {
+		parsed, err := strconv.Atoi(nStr)
+		if err != nil || parsed <= 0 {
+			writeError(w, r, http.StatusBadRequest, "VALIDATION_ERROR", "Query param 'n' must be a positive integer", ErrorDetail{
+				Field:    "n",
+				Expected: "positive integer",
+				Received: nStr,
+			})
+			return
 		}
+		n = parsed
 	}
 
 	topServices, err := h.redisClient.GetTopServices(r.Context(), n)
 	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to retrieve top services", nil)
+		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", fmt.Sprintf("Failed to query top services: %v", err), nil)
 		return
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"data": map[string]any{
-			"top_services": topServices,
-		},
+		"data": topServices,
 		"meta": getMeta(r),
 	})
 }
 
-// Search handles GET /search.
+// Search executes full-text search against Elasticsearch with filtering and pagination.
 func (h *Handler) Search(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 
 	page := 1
 	if pageStr := query.Get("page"); pageStr != "" {
-		if val, err := strconv.Atoi(pageStr); err == nil && val > 0 {
-			page = val
+		if p, err := strconv.Atoi(pageStr); err == nil && p > 0 {
+			page = p
 		}
 	}
 
 	size := 20
 	if sizeStr := query.Get("size"); sizeStr != "" {
-		if val, err := strconv.Atoi(sizeStr); err == nil && val > 0 {
-			size = val
+		if s, err := strconv.Atoi(sizeStr); err == nil && s > 0 {
+			size = s
 		}
 	}
 
@@ -260,6 +274,127 @@ func (h *Handler) Search(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"data": searchResult,
+		"meta": getMeta(r),
+	})
+}
+
+// DeleteIndex handles administrative request DELETE /admin/logs/indices/{index}.
+func (h *Handler) DeleteIndex(w http.ResponseWriter, r *http.Request) {
+	indexName := chi.URLParam(r, "index")
+	if strings.TrimSpace(indexName) == "" {
+		writeError(w, r, http.StatusBadRequest, "VALIDATION_ERROR", "Index name parameter is required", nil)
+		return
+	}
+
+	err := h.retentionManager.DeleteIndexByName(r.Context(), indexName)
+	if err != nil {
+		if errors.Is(err, retention.ErrInvalidIndexName) {
+			writeError(w, r, http.StatusBadRequest, "INVALID_INDEX_NAME", err.Error(), ErrorDetail{
+				Field:    "index",
+				Expected: "logs-v1-YYYY.MM.DD",
+				Received: indexName,
+			})
+			return
+		}
+		if errors.Is(err, retention.ErrProtectedIndex) {
+			writeError(w, r, http.StatusUnprocessableEntity, "PROTECTED_INDEX", err.Error(), nil)
+			return
+		}
+		if strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "not found") {
+			writeError(w, r, http.StatusNotFound, "NOT_FOUND", fmt.Sprintf("Index %q not found", indexName), nil)
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "DELETE_ERROR", fmt.Sprintf("Failed to delete index: %v", err), nil)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"data": map[string]string{
+			"deleted_index": indexName,
+			"status":        "deleted",
+		},
+		"meta": getMeta(r),
+	})
+}
+
+// DeleteLogsBefore handles administrative request DELETE /admin/logs?before=<RFC3339>.
+func (h *Handler) DeleteLogsBefore(w http.ResponseWriter, r *http.Request) {
+	beforeStr := r.URL.Query().Get("before")
+	if beforeStr == "" {
+		writeError(w, r, http.StatusBadRequest, "VALIDATION_ERROR", "Query parameter 'before' is required", ErrorDetail{
+			Field:    "before",
+			Expected: "RFC3339 timestamp",
+			Received: "",
+		})
+		return
+	}
+
+	beforeTime, err := time.Parse(time.RFC3339, beforeStr)
+	if err != nil {
+		if beforeTime, err = time.Parse(time.RFC3339Nano, beforeStr); err != nil {
+			writeError(w, r, http.StatusBadRequest, "VALIDATION_ERROR", "Invalid date format for 'before'", ErrorDetail{
+				Field:    "before",
+				Expected: "RFC3339 timestamp",
+				Received: beforeStr,
+			})
+			return
+		}
+	}
+
+	result, err := h.retentionManager.DeleteIndicesBefore(r.Context(), beforeTime)
+	if err != nil {
+		if errors.Is(err, retention.ErrFutureCutoff) {
+			writeError(w, r, http.StatusBadRequest, "INVALID_CUTOFF", "Cutoff timestamp cannot be in the future", nil)
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "DELETE_ERROR", fmt.Sprintf("Failed to delete indices: %v", err), nil)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"data": result,
+		"meta": getMeta(r),
+	})
+}
+
+// GetLogStats handles administrative request GET /admin/logs/stats.
+func (h *Handler) GetLogStats(w http.ResponseWriter, r *http.Request) {
+	stats, err := h.retentionManager.GetStats(r.Context())
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "STATS_ERROR", fmt.Sprintf("Failed to query log storage stats: %v", err), nil)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"data": stats,
+		"meta": getMeta(r),
+	})
+}
+
+// RunRetention handles administrative manual trigger POST /admin/logs/retention/run?days=30.
+func (h *Handler) RunRetention(w http.ResponseWriter, r *http.Request) {
+	days := 30
+	if daysStr := r.URL.Query().Get("days"); daysStr != "" {
+		if d, err := strconv.Atoi(daysStr); err == nil && d > 0 {
+			days = d
+		} else {
+			writeError(w, r, http.StatusBadRequest, "VALIDATION_ERROR", "Query parameter 'days' must be a positive integer", ErrorDetail{
+				Field:    "days",
+				Expected: "positive integer",
+				Received: daysStr,
+			})
+			return
+		}
+	}
+
+	result, err := h.retentionManager.RunRetention(r.Context(), days)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "RETENTION_ERROR", fmt.Sprintf("Retention run failed: %v", err), nil)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"data": result,
 		"meta": getMeta(r),
 	})
 }

@@ -156,6 +156,55 @@ var (
 			Buckets:   []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5},
 		},
 	)
+
+	// Log Lifecycle & Retention Metrics
+	RetentionRunsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "log_platform",
+			Subsystem: "retention",
+			Name:      "runs_total",
+			Help:      "Total number of retention cycles executed.",
+		},
+		[]string{"status"},
+	)
+
+	RetentionIndicesDeletedTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Namespace: "log_platform",
+			Subsystem: "retention",
+			Name:      "indices_deleted_total",
+			Help:      "Total number of expired log indices deleted by automated retention.",
+		},
+	)
+
+	RetentionIndicesEvaluatedTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Namespace: "log_platform",
+			Subsystem: "retention",
+			Name:      "indices_evaluated_total",
+			Help:      "Total number of log indices evaluated during retention cycles.",
+		},
+	)
+
+	RetentionDuration = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Namespace: "log_platform",
+			Subsystem: "retention",
+			Name:      "duration_seconds",
+			Help:      "Duration of retention execution cycles in seconds.",
+			Buckets:   []float64{0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0},
+		},
+	)
+
+	AdminDeletionsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "log_platform",
+			Subsystem: "admin",
+			Name:      "deletions_total",
+			Help:      "Total number of manual index deletion attempts via administrative API.",
+		},
+		[]string{"type", "status"},
+	)
 )
 
 func init() {
@@ -174,6 +223,11 @@ func init() {
 		RedisOperationsTotal,
 		RedisOperationDuration,
 		ProcessingDuration,
+		RetentionRunsTotal,
+		RetentionIndicesDeletedTotal,
+		RetentionIndicesEvaluatedTotal,
+		RetentionDuration,
+		AdminDeletionsTotal,
 	)
 }
 
