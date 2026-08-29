@@ -255,15 +255,21 @@ func (h *Handler) Search(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	searchQuery := query.Get("q")
+	if searchQuery == "" {
+		searchQuery = query.Get("query")
+	}
+
 	params := elastic.SearchParams{
-		Query:   query.Get("q"),
-		Service: query.Get("service"),
-		Level:   query.Get("level"),
-		TraceID: query.Get("trace_id"),
-		From:    fromStr,
-		To:      toStr,
-		Page:    page,
-		Size:    size,
+		TenantID: query.Get("tenant_id"),
+		Query:    searchQuery,
+		Service:  query.Get("service"),
+		Level:    query.Get("level"),
+		TraceID:  query.Get("trace_id"),
+		From:     fromStr,
+		To:       toStr,
+		Page:     page,
+		Size:     size,
 	}
 
 	searchResult, err := h.esClient.SearchLogs(r.Context(), params)
