@@ -667,201 +667,177 @@ Host: localhost:8082
 
 ## 5. Admin CLI (`logctl`)
 
-### 5.1 Global Flags
+`logctl` is the operator CLI for managing and inspecting the Log Platform by communicating exclusively with the Analytics/Admin HTTP API.
+
+### 5.1 Global Configuration & Flags
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--analytics-url` | `http://localhost:8082` | Analytics API base URL |
-| `--ingestor-url` | `http://localhost:8081` | Ingestor API base URL |
-| `--format` | `table` | Output format: `table`, `json`, `yaml` |
+| `--api-url <url>` | `$LOGCTL_API_URL` or `http://localhost:8082` | Analytics API base URL |
+| `--json` | `false` | Output machine-readable JSON to stdout |
+| `--help`, `-h` | — | Display help information |
 
 ---
 
-### 5.2 `logctl app create`
+### 5.2 `logctl health`
 
-Create a new application.
+Check health and status of the Analytics API and its dependencies (Elasticsearch, Redis).
 
 **Usage:**
 ```bash
-logctl app create <name> [description]
+logctl health [--json]
 ```
 
 **Example:**
 ```bash
-logctl app create ecommerce "E-commerce Platform"
+logctl health
 ```
 
 **Output:**
-```
-Created application:
-  ID:          550e8400-e29b-41d4-a716-446655440000
-  Name:        ecommerce
-  Description: E-commerce Platform
-  Created:     2026-08-06T10:00:00Z
-```
-
----
-
-### 5.3 `logctl env create`
-
-Create a new environment.
-
-**Usage:**
-```bash
-logctl env create <name>
-```
-
-**Example:**
-```bash
-logctl env create production
+```text
+STATUS                       healthy
+DEPENDENCY (elasticsearch)   healthy
+DEPENDENCY (redis)           healthy
+TIMESTAMP                    2026-08-29T10:18:44Z
+REQUEST ID                   req_abc123
 ```
 
 ---
 
-### 5.4 `logctl service create`
+### 5.3 `logctl logs stats`
 
-Create a new service under an application and environment.
+Show storage statistics, document counts, and active daily log indices.
 
 **Usage:**
 ```bash
-logctl service create <application> <environment> <name> [description]
-```
-
-**Example:**
-```bash
-logctl service create ecommerce production payment-api "Payment processing API"
+logctl logs stats [--json]
 ```
 
 **Output:**
-```
-Created service:
-  ID:          550e8400-e29b-41d4-a716-446655440001
-  Name:        payment-api
-  Application: ecommerce
-  Environment: production
-  Created:     2026-08-06T10:00:00Z
-```
+```text
+Storage Statistics
+------------------
+Total Logs:     50000
+Total Indices:  1
+Total Size:     8.3 MB (8.26 MB)
+Oldest Index:   logs-v1-2026.08.29 (2026-08-29 00:00:00 +0000 UTC)
+Newest Index:   logs-v1-2026.08.29 (2026-08-29 00:00:00 +0000 UTC)
 
----
-
-### 5.5 `logctl service list`
-
-List all services.
-
-**Usage:**
-```bash
-logctl service list [--app=<name>] [--env=<name>]
-```
-
-**Example:**
-```bash
-logctl service list --app=ecommerce --env=production
-```
-
-**Output:**
-```
-NAME            APPLICATION       ENVIRONMENT    CREATED
-payment-api     ecommerce         production     2026-08-01T00:00:00Z
-auth-service    ecommerce         production     2026-08-01T00:00:00Z
+INDEX NAME           DOCUMENTS   SIZE     STATUS   CREATED
+logs-v1-2026.08.29   50000       8.3 MB   open     2026-08-29 09:36:03.068 +0000 UTC
 ```
 
 ---
 
-### 5.6 `logctl search`
+### 5.4 `logctl logs search`
 
-Search logs via the Analytics API.
+Search and filter indexed log documents via the Analytics API (`GET /search`).
 
 **Usage:**
 ```bash
-logctl search [flags]
+logctl logs search [flags]
 ```
 
 **Flags:**
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--q` | string | `*` | Search query |
-| `--service` | string | — | Filter by service |
-| `--level` | string | — | Filter by level |
-| `--from` | string | `now-1h` | Start time |
-| `--to` | string | `now` | End time |
-| `--size` | int | 20 | Results per page |
-| `--page` | int | 1 | Page number |
+| `--query`, `-q` | string | `""` | Full-text search match in log message |
+| `--service` | string | `""` | Filter by service name |
+| `--level` | string | `""` | Filter by level (`DEBUG`, `INFO`, `WARN`, `ERROR`, `FATAL`) |
+| `--trace-id` | string | `""` | Filter by trace ID |
+| `--tenant-id` | string | `""` | Filter by tenant ID |
+| `--from` | string | `""` | Filter from timestamp (RFC3339) |
+| `--to` | string | `""` | Filter to timestamp (RFC3339) |
+| `--page` | int | `1` | Page number |
+| `--size` | int | `20` | Results per page (max 100) |
+| `--json` | bool | `false` | Output machine-readable JSON |
 
 **Example:**
 ```bash
-logctl search --service=payment-api --level=ERROR --from="2026-08-06T00:00:00Z" --size=5
+logctl logs search --service payment-api --level ERROR --size 2
 ```
 
 **Output:**
-```
-TIME                 LEVEL   SERVICE       MESSAGE
-2026-08-06T09:45:00Z ERROR   payment-api   DB connection timeout after 30s
-2026-08-06T09:44:30Z ERROR   payment-api   HTTP 500 from upstream
+```text
+Search Results (Total: 42, Page 1/21)
+TIMESTAMP                     LEVEL  SERVICE      TENANT   TRACE ID                MESSAGE
+2026-08-29T09:37:07.538Z      ERROR  payment-api  default  trace-99e2b0d66ffc0786  Timeout waiting for lock on resource_768
+2026-08-29T09:37:07.464Z      ERROR  payment-api  default  trace-4eb37cd8e73821ff  DB connection timeout after 851s
 ```
 
 ---
 
-### 5.7 `logctl benchmark`
+### 5.5 `logctl logs delete-index`
 
-Run a load test against the Ingestor.
+Delete a specific daily log index by name (destructive). Prompts for interactive confirmation unless `--yes` is supplied.
 
 **Usage:**
 ```bash
-logctl benchmark [flags]
+logctl logs delete-index <index_name> [--yes] [--json]
 ```
 
-**Flags:**
-
-| Flag | Type | Default | Description |
-|------|------|---------|-------------|
-| `--rate` | int | 100 | Logs per second |
-| `--duration` | duration | 60s | Test duration |
-| `--service` | string | `payment-api` | Service name to use in generated logs |
-| `--level` | string | `INFO` | Log level distribution: `mixed`, `INFO`, `ERROR` |
+**Safety Protection:**
+- Rejects non-log indices (e.g. `.kibana`, `.security`) with `400 INVALID_INDEX_NAME`.
+- Rejects today's active write index with `422 PROTECTED_INDEX`.
 
 **Example:**
 ```bash
-logctl benchmark --rate=1000 --duration=5m --service=payment-api --level=mixed
-```
-
-**Output:**
-```
-Benchmark Results:
-  Duration:        5m0s
-  Total Requests:  300000
-  Successful:      300000
-  Failed:          0
-  Rate (avg):      998.4 req/s
-  Latency (p50):   12ms
-  Latency (p99):   45ms
+logctl logs delete-index logs-v1-2026.08.01 --yes
 ```
 
 ---
 
-### 5.8 `logctl dlq inspect`
+### 5.6 `logctl logs delete-before`
 
-Inspect the Dead Letter Queue.
+Delete all log indices older than the specified cutoff timestamp (destructive). Prompts for confirmation unless `--yes` is supplied.
 
 **Usage:**
 ```bash
-logctl dlq inspect [--limit=<n>]
+logctl logs delete-before <RFC3339_timestamp> [--yes] [--json]
 ```
 
 **Example:**
 ```bash
-logctl dlq inspect --limit=10
+logctl logs delete-before 2026-08-01T00:00:00Z --yes
+```
+
+---
+
+### 5.7 `logctl retention status`
+
+Display retention lifecycle summary, active retention threshold, and index details.
+
+**Usage:**
+```bash
+logctl retention status [--json]
+```
+
+---
+
+### 5.8 `logctl retention run`
+
+Trigger manual retention policy cleanup against the Analytics API (`POST /admin/logs/retention/run?days=N`).
+
+**Usage:**
+```bash
+logctl retention run [--days N] [--json]
+```
+
+**Example:**
+```bash
+logctl retention run --days 30
 ```
 
 **Output:**
-```
-DLQ Status:
-  Total Messages: 42
-
-Recent Failures:
-  TIME                 ERROR                          SERVICE
-  2026-08-06T09:45:00Z invalid JSON: unexpected token unknown-api
-  2026-08-06T09:44:55Z service 'old-api' not found  old-api
+```text
+Retention Execution Complete
+----------------------------
+Evaluated Indices: 4
+Deleted Indices:   1
+Cutoff Date:       2026-07-30 00:00:00 +0000 UTC
+Duration:          15.67ms
+Deleted Indices:   logs-v1-2026.07.15
 ```
 
 ---

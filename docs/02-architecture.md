@@ -513,6 +513,38 @@ In single-document processing mode, the Stream Processor issued an individual HT
 
 ---
 
+## ADR-017: Operator CLI (`logctl`) as HTTP Client to Analytics/Admin API
+
+### Context
+Operators and developers need an administrative and inspection CLI (`logctl`) to query cluster health, inspect storage statistics, search logs, trigger index retention cycles, and perform safe administrative deletions. 
+
+### Options Considered
+1. **Direct Data Access CLI:** CLI imports Elasticsearch and Redis client libraries and runs queries directly against underlying database clusters.
+2. **Operator Client over Analytics HTTP API (Selected):** CLI acts strictly as an HTTP client communicating exclusively with the Analytics and Log Lifecycle Admin endpoints (`/health`, `/admin/logs/stats`, `/search`, `/admin/logs/indices/*`, `/admin/logs/retention/run`).
+
+### Decision
+Option 2: `logctl` is implemented exclusively as an HTTP operator client to the Analytics/Admin API.
+
+```mermaid
+flowchart LR
+    Operator["Operator / Script"] -- "logctl CLI" --> Client["cmd/logctl/client"]
+    Client -- "HTTP REST (JSON)" --> Analytics["Analytics API (:8082)"]
+    Analytics -- "Search / Lifecycle" --> ES[("Elasticsearch")]
+    Analytics -- "Real-time Metrics" --> Redis[("Redis")]
+```
+
+### Invariants & Design Principles
+1. **Zero Architecture / Path Bypass:** `logctl` does not connect directly to Elasticsearch, Kafka, or Redis, avoiding bypassing server-side validation, metrics, and security controls.
+2. **Server-Side Safety Invariants:** All lifecycle rules (rejection of non-log index deletion, protection of today's active write index) remain strictly enforced by the server (`internal/retention`), ensuring that CLI commands cannot compromise cluster stability.
+3. **Dual Output Mode:** Outputs tabular human-readable formatting by default with `text/tabwriter`, and provides `--json` for machine-readable automation and scripting.
+4. **Interactive Confirmation for Destructive Actions:** Deletion commands (`delete-index`, `delete-before`) prompt for interactive user confirmation (`Are you sure? [y/N]`) unless explicitly bypassed with `--yes` or `-y`.
+
+### Consequences
+- **Positive:** Preserves the Single Responsibility Principle, maintains centralized logging and auditability in the Analytics API, and prevents duplicate business logic.
+- **Negative:** Requires the Analytics API to be running for operator administrative tasks.
+
+---
+
 ## Summary Table
 
 | # | Decision | Status | Reversibility |
@@ -533,6 +565,7 @@ In single-document processing mode, the Stream Processor issued an individual HT
 | 014 | Index lifecycle & dedicated retention service | Accepted | Medium (swap lifecycle manager) |
 | 015 | Multi-tenant architecture & PostgreSQL metadata | Accepted | Medium (schema evolution) |
 | 016 | Micro-batched ES bulk indexing & offset safety | Accepted | Medium (tune batch parameters) |
+| 017 | Operator CLI (logctl) over Analytics HTTP API | Accepted | Easy (expand CLI commands) |
 
 ---
 

@@ -388,12 +388,52 @@ go run ./cmd/loadgen -n=10000 --rate=0 --workers=50
 
 ---
 
+---
+
+## 🛠️ Administrative CLI (`cmd/logctl`)
+
+`logctl` is the operator command-line interface for managing and inspecting the Log Platform. It interacts exclusively with the Analytics/Admin API (`http://localhost:8082` by default, configurable via `LOGCTL_API_URL` or `--api-url`) and preserves all server-side safety protections.
+
+### Command Reference & Examples
+
+```bash
+# 1. Check API and Dependency Health
+go run ./cmd/logctl health
+go run ./cmd/logctl health --json
+
+# 2. Inspect Storage and Index Statistics
+go run ./cmd/logctl logs stats
+go run ./cmd/logctl logs stats --json
+
+# 3. Search and Filter Logs
+go run ./cmd/logctl logs search --service payment-api --level ERROR
+go run ./cmd/logctl logs search --trace-id trace-12345 --json
+go run ./cmd/logctl logs search --tenant-id tenant-a --query "timeout" --size 20
+
+# 4. View Retention & Lifecycle Status
+go run ./cmd/logctl retention status
+go run ./cmd/logctl retention status --json
+
+# 5. Trigger Manual Retention Run
+go run ./cmd/logctl retention run --days 30
+go run ./cmd/logctl retention run --days 14 --json
+
+# 6. Delete Expired Index by Name (Requires confirmation unless --yes is supplied)
+go run ./cmd/logctl logs delete-index logs-v1-2026.08.01
+go run ./cmd/logctl logs delete-index logs-v1-2026.08.01 --yes
+
+# 7. Delete Indices Older than Timestamp (Requires confirmation unless --yes is supplied)
+go run ./cmd/logctl logs delete-before 2026-08-01T00:00:00Z --yes
+```
+
+---
+
 ## 🧪 Testing & Code Quality
 
 Run all unit and integration tests:
 ```bash
 # Run unit tests
-go test -v -race ./...
+go test -v ./...
 
 # Run code formatting check
 gofmt -s -l .
@@ -415,9 +455,9 @@ go build ./...
 - [x] Analytics REST API (`:8082`) with search and real-time metrics
 - [x] Prometheus instrumentation & provisioned Grafana dashboards
 - [x] Configurable Load Generator CLI (`cmd/loadgen`)
-- [ ] Elasticsearch micro-batching / Bulk indexing (`_bulk` API)
-- [ ] Partition-level parallel consumer worker pools
-- [ ] Admin management CLI (`cmd/logctl`)
+- [x] Elasticsearch micro-batching / Bulk indexing (`_bulk` API)
+- [x] Partition-level parallel consumer worker pools
+- [x] Admin management CLI (`cmd/logctl`)
 - [ ] Next.js web dashboard frontend
 
 ---
